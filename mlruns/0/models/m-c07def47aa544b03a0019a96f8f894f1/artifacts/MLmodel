@@ -1,0 +1,24 @@
+artifact_path: /home/apeksha-ssi021/Shyena/ml_model_management/mlruns/0/models/m-c07def47aa544b03a0019a96f8f894f1/artifacts
+flavors:
+  onnx:
+    code: null
+    data: model.onnx
+    onnx_session_options: null
+    onnx_version: 1.17.0
+    providers:
+    - CUDAExecutionProvider
+    - CPUExecutionProvider
+  python_function:
+    data: model.onnx
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.onnx
+    python_version: 3.10.12
+mlflow_version: 3.16.1
+model_id: m-c07def47aa544b03a0019a96f8f894f1
+model_size_bytes: 2051
+model_uuid: m-c07def47aa544b03a0019a96f8f894f1
+prompts: null
+run_id: dac42874f89d49ccbde309f1c5ba059d
+utc_time_created: '2026-09-17 10:10:20.896246'

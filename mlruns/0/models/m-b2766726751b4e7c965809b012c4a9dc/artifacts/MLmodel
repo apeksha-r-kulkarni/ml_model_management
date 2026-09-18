@@ -1,0 +1,23 @@
+artifact_path: /home/apeksha-ssi021/Shyena/ml_model_management/mlruns/0/models/m-b2766726751b4e7c965809b012c4a9dc/artifacts
+flavors:
+  python_function:
+    config:
+      device: null
+    data: data
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.pytorch
+    pickle_module_name: mlflow.pytorch.pickle_module
+    python_version: 3.10.12
+  pytorch:
+    code: null
+    model_data: data
+    pytorch_version: 2.14.0+cu130
+mlflow_version: 3.16.1
+model_id: m-b2766726751b4e7c965809b012c4a9dc
+model_size_bytes: 4209
+model_uuid: m-b2766726751b4e7c965809b012c4a9dc
+prompts: null
+run_id: 342cafda06b149a18d8505ac5681166c
+utc_time_created: '2026-09-17 10:10:47.406638'

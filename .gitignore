@@ -1,0 +1,10 @@
+.venv/
+.env
+.env.*
+__pycache__/
+*.py[cod]
+*.sqlite3
+mlflow.db
+db.sqlite3
+dummy.pt
+.DS_Store
