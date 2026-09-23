@@ -8,3 +8,10 @@ mlflow.db
 db.sqlite3
 dummy.pt
 .DS_Store
+MinioIntegration/
+mlruns/
+registration/.venv/
+registration/test_models/venv/
+registration/test_models/*.onnx
+registration/test_models/*.pt
+registration/test_models/*.data

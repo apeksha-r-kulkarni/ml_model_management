@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ML Model Management</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; max-width: 1000px; margin: 0 auto; padding: 20px; color: #333; }
+        h1, h2 { color: #2c3e50; }
+        .card { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-bottom: 20px; background: #f9f9f9; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; font-weight: bold; margin-bottom: 5px; }
+        input[type="text"], input[type="number"], select, input[type="file"] { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { background-color: #3498db; color: white; border: none; padding: 10px 15px; cursor: pointer; border-radius: 4px; font-weight: bold; }
+        button:hover { background-color: #2980b9; }
+        button.btn-danger { background-color: #e74c3c; }
+        button.btn-danger:hover { background-color: #c0392b; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .message { padding: 10px; border-radius: 4px; margin-bottom: 15px; display: none; }
+        .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .version-row { background-color: #fafafa; }
+    </style>
+</head>
+<body>
+
+    <h1>ML Model Management</h1>
+
+    <div id="alertBox" class="message"></div>
+
+    <div class="card">
+        <h2>Register New Model</h2>
+        <form id="uploadForm">
+            <div class="form-group">
+                <label>Model Name (for MLflow):</label>
+                <input type="text" id="model_name" required>
+            </div>
+            <div class="form-group">
+                <label>Model Type:</label>
+                <select id="model_type" required>
+                    <option value="">Select...</option>
+                    <option value="Speech">Speech</option>
+                    <option value="NER">NER</option>
+                    <option value="File Classifier">File Classifier</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Purpose *:</label>
+                <select id="purpose" required>
+                    <option value="">Select...</option>
+                    <option value="__ADD_NEW__">+ Add New Purpose</option>
+                </select>
+                <input type="text" id="new_purpose" placeholder="Enter new purpose" style="display:none; margin-top:0.5rem;" />
+            </div>
+            <div class="form-group">
+                <label>Architecture:</label>
+                <select id="architecture">
+                    <option value="">Select...</option>
+                    <option value="__ADD_NEW__">+ Add New Architecture</option>
+                </select>
+                <input type="text" id="new_architecture" placeholder="Enter new architecture name" style="display:none; margin-top:0.5rem;" />
+            </div>
+            <div class="form-group">
+                <label>Accuracy (0-100):</label>
+                <input type="number" id="accuracy" step="0.01" min="0" max="100" value="0.0">
+            </div>
+            <div class="form-group">
+                <label>Priority:</label>
+                <input type="number" id="priority" placeholder="e.g. 1">
+            </div>
+            <div class="form-group checkbox-group" id="deployment_points_container" style="display:none;">
+                <label>Deployment Points *</label><br>
+                <div id="deployment_points_list"></div>
+            </div>
+            
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="is_deployable"> Is Deployable Ready?
+                </label>
+            </div>
+            <div class="form-group">
+                <label>Versioning:</label>
+                <select id="versioning" required>
+                    <option value="Auto-increment" selected>Auto-increment (MLflow default)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Remarks:</label>
+                <textarea id="remarks" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;" rows="3"></textarea>
+            </div>
+            <div class="form-group">
+                <label>Model File (.pt, .onnx):</label>
+                <input type="file" id="model_file" accept=".pt,.onnx" required>
+            </div>
+            <button type="submit">Upload & Register</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Search Models</h2>
+        <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+            <input type="text" id="searchInput" placeholder="Enter purpose/use case..." style="flex-grow: 1;">
+            <button onclick="searchModels()">Search</button>
+            <button onclick="loadModels()" style="background-color: #7f8c8d;">Clear Search</button>
+        </div>
+    </div>
+
+    <div class="card" id="editCard" style="display:none; border-color: #3498db;">
+        <h2>Edit Model: <span id="editModelName"></span></h2>
+        <form id="editForm">
+            <input type="hidden" id="edit_id">
+            <div class="form-group">
+                <label>Purpose *:</label>
+                <select id="edit_purpose" required>
+                    <option value="">Select...</option>
+                    <option value="__ADD_NEW__">+ Add New Purpose</option>
+                </select>
+                <input type="text" id="edit_new_purpose" placeholder="Enter new purpose" style="display:none; margin-top:0.5rem;" />
+            </div>
+            <div class="form-group">
+                <label>Architecture:</label>
+                <input type="text" id="edit_architecture">
+            </div>
+            <div class="form-group">
+                <label>Accuracy (0-100):</label>
+                <input type="number" id="edit_accuracy" step="0.01" min="0" max="100">
+            </div>
+            <div class="form-group">
+                <label>Priority:</label>
+                <input type="number" id="edit_priority" placeholder="e.g. 1">
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="edit_is_deployable"> Is Deployable Ready?
+                </label>
+            </div>
+            <button type="submit">Save Changes</button>
+            <button type="button" onclick="document.getElementById('editCard').style.display='none'" style="background-color: #95a5a6;">Cancel</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <button onclick="loadModels()">List Models</button>
+        <div id="modelsContainer">
+            <p>Click List Models to view registered models.</p>
+        </div>
+    </div>
+
+    <script>
+        function showAlert(msg, isSuccess) {
+            const box = document.getElementById('alertBox');
+            box.textContent = msg;
+            box.className = 'message ' + (isSuccess ? 'success' : 'error');
+            box.style.display = 'block';
+            setTimeout(() => box.style.display = 'none', 5000);
+        }
+
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const archSelect = document.getElementById('architecture');
+            let archValue = archSelect.value;
+            if (archValue === '__ADD_NEW__') {
+                archValue = document.getElementById('new_architecture').value;
+            }
+            
+            const formData = new FormData();
+            formData.append('model_name', document.getElementById('model_name').value);
+            formData.append('model_type', document.getElementById('model_type').value);
+            formData.append('architecture', archValue);
+            formData.append('accuracy', document.getElementById('accuracy').value);
+            formData.append('priority', document.getElementById('priority').value);
+            formData.append('is_deployable', document.getElementById('is_deployable').checked);
+            formData.append('versioning', document.getElementById('versioning').value);
+            
+            let purpValue = document.getElementById('purpose').value;
+            if (purpValue === '__ADD_NEW__') { purpValue = document.getElementById('new_purpose').value; }
+            formData.append('purpose', purpValue);
+
+            formData.append('remarks', document.getElementById('remarks').value);
+            formData.append('model', document.getElementById('model_file').files[0]);
+
+            const checked_dps = document.querySelectorAll('input[name="deployment_points"]:checked');
+            checked_dps.forEach(dp => {
+                formData.append('deployment_points', dp.value);
+            });
+
+            try {
+                const res = await fetch('/api/models/register/', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showAlert("Model uploaded and registered successfully.", true);
+                    document.getElementById('uploadForm').reset();
+                    loadModels();
+                } else {
+                    showAlert('Error: ' + data.error, false);
+                }
+            } catch (err) {
+                showAlert('Upload failed: ' + err, false);
+            }
+        });
+
+        async function loadModels() {
+            try {
+                const res = await fetch('/api/models/');
+                const data = await res.json();
+                if (data.success) {
+                    renderModels(data.models);
+                    updateArchitectures(data.models);
+                } else {
+                    showAlert('Failed to load models: ' + data.error, false);
+                }
+            } catch (err) {
+                showAlert('Failed to load models: ' + err, false);
+            }
+        }
+
+        function renderModels(models) {
+            const container = document.getElementById('modelsContainer');
+            if (!models || models.length === 0) {
+                container.innerHTML = '<p>No models registered yet.</p>';
+                return;
+            }
+
+            // Group by model name
+            const grouped = {};
+            models.forEach(m => {
+                if (!grouped[m.name]) grouped[m.name] = [];
+                grouped[m.name].push(m);
+            });
+
+            let html = '<table><thead><tr><th>Name</th><th>Versions</th></tr></thead><tbody>';
+            Object.keys(grouped).forEach(name => {
+                html += `<tr>
+                    <td><strong>${name}</strong></td>
+                    <td>`;
+                
+                html += '<table style="margin-top:0; font-size: 0.9em;"><thead><tr><th>Version</th><th>Type</th><th>Arch</th><th>Priority</th><th>Deployable</th><th>Accuracy</th><th>Action</th></tr></thead><tbody>';
+                grouped[name].forEach(v => {
+                    html += `<tr class="version-row">
+                        <td>v${v.version}</td>
+                        <td>${v.model_type || '-'}</td>
+                        <td>${v.architecture || '-'}</td>
+                        <td>${v.priority !== null && v.priority !== undefined && v.priority !== "" ? v.priority : '-'}</td>
+                        <td>${v.is_deployable ? 'Yes' : 'No'}</td>
+                        <td>${v.accuracy || 0.0}</td>
+                        <td><button onclick="editModel(${v.id}, '${name}', ${v.version}, '${v.purpose}', '${v.architecture}', ${v.accuracy}, '${v.priority}', ${v.is_deployable})">Edit</button> <button class="btn-danger" onclick="deleteModel('${name}', ${v.version}, ${v.id})">Delete</button></td>
+                    </tr>`;
+                });
+                html += '</tbody></table></td></tr>';
+            });
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        async function deleteModel(name, version, db_id) {
+            if (!confirm(`Are you sure you want to delete ${name} v${version}?`)) return;
+
+            try {
+                const res = await fetch(`/api/models/${name}/version/${version}/`, {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ db_id: db_id })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showAlert(data.message || 'Model deleted.', true);
+                    loadModels();
+                } else {
+                    showAlert('Failed to delete: ' + data.error, false);
+                }
+            } catch (err) {
+                showAlert('Deletion failed: ' + err, false);
+            }
+        }
+
+        function updateArchitectures(models) {
+            if (!models) return;
+            const archs = new Set();
+            models.forEach(m => {
+                if (m.architecture) archs.add(m.architecture);
+            });
+            
+            const archSelect = document.getElementById('architecture');
+            archSelect.innerHTML = `
+                <option value="">Select...</option>
+                <option value="__ADD_NEW__">+ Add New Architecture</option>
+            `;
+            archs.forEach(arch => {
+                const opt = document.createElement('option');
+                opt.value = arch;
+                opt.textContent = arch;
+                archSelect.appendChild(opt);
+            });
+        }
+
+        document.getElementById('architecture').addEventListener('change', (e) => {
+            const newArchInput = document.getElementById('new_architecture');
+            if (e.target.value === '__ADD_NEW__') {
+                newArchInput.style.display = 'block';
+                newArchInput.required = true;
+            } else {
+                newArchInput.style.display = 'none';
+                newArchInput.required = false;
+            }
+        });
+
+        const COMPATIBILITY_RULES = {
+            'Speech': ['Cloud App', 'Edge Device'],
+            'NER': ['Cloud App'],
+            'File Classifier': ['Dashboard', 'Cloud App']
+        };
+
+        const modelTypeSelect = document.getElementById('model_type');
+        const dpContainer = document.getElementById('deployment_points_container');
+        const dpList = document.getElementById('deployment_points_list');
+
+        modelTypeSelect.addEventListener('change', () => {
+            const selected = modelTypeSelect.value;
+            dpList.innerHTML = '';
+            if (selected && COMPATIBILITY_RULES[selected]) {
+                dpContainer.style.display = 'block';
+                COMPATIBILITY_RULES[selected].forEach(dp => {
+                    dpList.innerHTML += `<label style="display:inline-flex; align-items:center; margin-right:1rem; cursor:pointer;"><input type="checkbox" name="deployment_points" value="${dp}" style="margin-right:0.5rem;"> ${dp}</label>`;
+                });
+            } else {
+                dpContainer.style.display = 'none';
+            }
+        });
+
+        // Initial load
+        loadPurposes();
+        // loadModels(); // Removed auto-load per requirements
+
+        async function loadPurposes() {
+            try {
+                const res = await fetch('/api/models/purposes/');
+                const data = await res.json();
+                if (data.success) {
+                    const populateDropdown = (id) => {
+                        const select = document.getElementById(id);
+                        select.innerHTML = '<option value="">Select...</option><option value="__ADD_NEW__">+ Add New Purpose</option>';
+                        data.purposes.forEach(p => {
+                            const opt = document.createElement('option');
+                            opt.value = p;
+                            opt.textContent = p;
+                            select.appendChild(opt);
+                        });
+                    };
+                    populateDropdown('purpose');
+                    populateDropdown('edit_purpose');
+                }
+            } catch (err) {
+                console.error("Failed to load purposes:", err);
+            }
+        }
+
+        async function searchModels() {
+            const query = document.getElementById('searchInput').value;
+            if (!query) return loadModels();
+            try {
+                const res = await fetch('/api/models/find/?purpose=' + encodeURIComponent(query));
+                const data = await res.json();
+                if (data.success) {
+                    renderModels(data.models);
+                } else {
+                    showAlert('Search failed: ' + data.error, false);
+                }
+            } catch (err) {
+                showAlert('Search failed: ' + err, false);
+            }
+        }
+
+        function editModel(id, name, version, purpose, architecture, accuracy, priority, isDeployable) {
+            document.getElementById('editCard').style.display = 'block';
+            document.getElementById('editModelName').textContent = `${name} v${version}`;
+            document.getElementById('edit_id').value = id;
+            
+            // Try setting purpose, if not exists, default to empty
+            const pSelect = document.getElementById('edit_purpose');
+            const opts = Array.from(pSelect.options).map(o => o.value);
+            if (opts.includes(purpose)) {
+                pSelect.value = purpose;
+                document.getElementById('edit_new_purpose').style.display = 'none';
+            } else {
+                pSelect.value = '__ADD_NEW__';
+                document.getElementById('edit_new_purpose').style.display = 'block';
+                document.getElementById('edit_new_purpose').value = purpose;
+            }
+
+            document.getElementById('edit_architecture').value = architecture && architecture !== 'null' ? architecture : '';
+            document.getElementById('edit_accuracy').value = accuracy || 0;
+            document.getElementById('edit_priority').value = priority && priority !== 'null' ? priority : '';
+            document.getElementById('edit_is_deployable').checked = (isDeployable === true || isDeployable === 'true');
+            
+            window.scrollTo({ top: document.getElementById('editCard').offsetTop, behavior: 'smooth' });
+        }
+
+        document.getElementById('editForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            let pValue = document.getElementById('edit_purpose').value;
+            if (pValue === '__ADD_NEW__') { pValue = document.getElementById('edit_new_purpose').value; }
+            
+            const payload = {
+                id: document.getElementById('edit_id').value,
+                purpose: pValue,
+                architecture: document.getElementById('edit_architecture').value,
+                accuracy: document.getElementById('edit_accuracy').value,
+                priority: document.getElementById('edit_priority').value,
+                is_deployable: document.getElementById('edit_is_deployable').checked
+            };
+            
+            try {
+                const res = await fetch('/api/models/update/', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showAlert("Model updated successfully.", true);
+                    document.getElementById('editCard').style.display = 'none';
+                    loadModels();
+                    loadPurposes();
+                } else {
+                    showAlert('Error: ' + data.error, false);
+                }
+            } catch (err) {
+                showAlert('Update failed: ' + err, false);
+            }
+        });
+
+        document.getElementById('purpose').addEventListener('change', (e) => {
+            document.getElementById('new_purpose').style.display = (e.target.value === '__ADD_NEW__') ? 'block' : 'none';
+            document.getElementById('new_purpose').required = (e.target.value === '__ADD_NEW__');
+        });
+
+        document.getElementById('edit_purpose').addEventListener('change', (e) => {
+            document.getElementById('edit_new_purpose').style.display = (e.target.value === '__ADD_NEW__') ? 'block' : 'none';
+            document.getElementById('edit_new_purpose').required = (e.target.value === '__ADD_NEW__');
+        });
+
+    </script>
+</body>
+</html>
