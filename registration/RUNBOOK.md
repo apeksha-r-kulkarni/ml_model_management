@@ -24,14 +24,15 @@ Create `.env` in `registration/core`:
 ```env
 DB_NAME=ml_model_management
 DB_USER=django_user
-DB_PASSWORD=password
+DB_PASSWORD=<your-db-password>
 DB_HOST=localhost
 DB_PORT=5432
 MLFLOW_TRACKING_URI=http://127.0.0.1:5000
 MINIO_ENDPOINT=127.0.0.1:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-BUCKET_NAME=mlflow-dev
+MINIO_ACCESS_KEY=<your-minio-access-key>
+MINIO_SECRET_KEY=<your-minio-secret-key>
+BUCKET_NAME=<your-minio-bucket>
+DJANGO_SECRET_KEY=<your-django-secret-key>
 ```
 
 ### 3. Migrations

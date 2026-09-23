@@ -16,6 +16,7 @@ MINIO_ACCESS_KEY=$(grep -E '^MINIO_ACCESS_KEY=' "$ENV_FILE" | cut -d '=' -f 2 | 
 MINIO_SECRET_KEY=$(grep -E '^MINIO_SECRET_KEY=' "$ENV_FILE" | cut -d '=' -f 2 | tr -d ' "')
 MINIO_BUCKET=$(grep -E '^MINIO_BUCKET=' "$ENV_FILE" | cut -d '=' -f 2 | tr -d ' "')
 MINIO_SECURE=$(grep -E '^MINIO_SECURE=' "$ENV_FILE" | cut -d '=' -f 2 | tr -d ' "')
+MLFLOW_S3_IGNORE_TLS=$(grep -E '^MLFLOW_S3_IGNORE_TLS=' "$ENV_FILE" | cut -d '=' -f 2 | tr -d ' "')
 
 # Set protocol for the endpoint URL based on MINIO_SECURE flag
 PROTOCOL="http"
@@ -27,9 +28,7 @@ fi
 export AWS_ACCESS_KEY_ID="${MINIO_ACCESS_KEY}"
 export AWS_SECRET_ACCESS_KEY="${MINIO_SECRET_KEY}"
 export MLFLOW_S3_ENDPOINT_URL="${PROTOCOL}://${MINIO_ENDPOINT}"
-
-# Ignore TLS verification as you did during your testing
-export MLFLOW_S3_IGNORE_TLS="true"
+export MLFLOW_S3_IGNORE_TLS="${MLFLOW_S3_IGNORE_TLS:-false}"
 
 echo "MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL}"
 echo "Artifact Root: s3://${MINIO_BUCKET}"
