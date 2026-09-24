@@ -28,7 +28,8 @@ class ModelManager:
         )
         
         # Set up MLflow
-        mlflow.set_tracking_uri(self.config.tracking_uri)
+        mlflow.set_tracking_uri("http://127.0.0.1:5000")
+        mlflow.set_registry_uri("http://127.0.0.1:5000")
 
     def registerModel(
         self,
@@ -48,7 +49,7 @@ class ModelManager:
             
         # Predict next version using MLflow (Authoritative source)
         from mlflow.tracking import MlflowClient
-        client = MlflowClient(tracking_uri=self.config.tracking_uri)
+        client = MlflowClient(tracking_uri="http://127.0.0.1:5000")
         
         # Ensure registered model exists so we don't fail later
         try:

@@ -11,15 +11,8 @@ class ModelConfig:
         
     @property
     def tracking_uri(self):
-        import urllib.parse
-        db_user = os.getenv('DB_USER', 'django_user')
-        db_password = os.getenv('DB_PASSWORD', 'password')
-        db_host = os.getenv('DB_HOST', 'localhost')
-        db_port = os.getenv('DB_PORT', '5432')
-        db_name = os.getenv('DB_NAME', 'model_management')
-        encoded_password = urllib.parse.quote_plus(db_password)
-        pg_uri = f"postgresql://{db_user}:{encoded_password}@{db_host}:{db_port}/{db_name}"
-        return os.getenv("MLFLOW_TRACKING_URI", pg_uri)
+        # Use the MLflow Server HTTP endpoint instead of direct DB connection
+        return os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
         
     @property
     def minio_endpoint(self):

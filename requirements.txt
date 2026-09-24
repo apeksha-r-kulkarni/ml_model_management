@@ -7,3 +7,5 @@ onnxruntime
 numpy
 pandas
 protobuf==3.20.3
+psycopg2
+boto3
