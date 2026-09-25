@@ -7,10 +7,6 @@ from dotenv import load_dotenv
 import mlflow
 from mlflow.tracking import MlflowClient
 
-# Force removal of AWS credentials so the process proves it doesn't need them
-os.environ.pop("AWS_ACCESS_KEY_ID", None)
-os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
-os.environ.pop("MLFLOW_S3_ENDPOINT_URL", None)
 
 ALIAS_TO_DP = {
     "deployed-lid": "LID",
@@ -31,6 +27,18 @@ class MLflowService:
         mlflow.set_tracking_uri(self.tracking_uri)
         mlflow.set_registry_uri(self.tracking_uri)
         
+        # Map MinIO configuration to AWS environment variables for boto3
+        os.environ["AWS_ACCESS_KEY_ID"] = os.environ.get("MINIO_ACCESS_KEY", "")
+        os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ.get("MINIO_SECRET_KEY", "")
+        
+        ignore_tls = os.environ.get("MLFLOW_S3_IGNORE_TLS", "true") # Default to true for self-signed certs
+        os.environ["MLFLOW_S3_IGNORE_TLS"] = ignore_tls
+        
+        protocol = "https" if str(os.environ.get("MINIO_SECURE", "")).lower() in ["true", "1"] else "http"
+        endpoint = os.environ.get("MINIO_ENDPOINT", "")
+        if endpoint:
+            os.environ["MLFLOW_S3_ENDPOINT_URL"] = f"{protocol}://{endpoint}"
+            
         self.client = MlflowClient(tracking_uri=self.tracking_uri)
         
     def _ensure_registered_model(self, name: str, model_type: str, purpose: str):
@@ -57,6 +65,7 @@ class MLflowService:
         # Start run and log artifact
         with mlflow.start_run() as run:
             run_id = run.info.run_id
+            artifact_uri = run.info.artifact_uri
             mlflow.log_artifact(local_file_path)
             
         self._ensure_registered_model(
@@ -67,6 +76,8 @@ class MLflowService:
         
         # Create Model Version using the artifact in the run
         model_uri = f"runs:/{run_id}/{original_filename}"
+        s3_path = f"{artifact_uri}/{original_filename}"
+        
         mv = self.client.create_model_version(
             name=model_name,
             source=model_uri,
@@ -87,7 +98,8 @@ class MLflowService:
             "priority": str(metadata.get("priority", "")),
             "is_deployable": str(metadata.get("is_deployable", False)),
             "deployment_points": json.dumps(deployment_points),
-            "remarks": metadata.get("remarks", "")
+            "remarks": metadata.get("remarks", ""),
+            "artifact_path": s3_path
         }
         
         for k, v in mv_tags.items():
@@ -103,7 +115,7 @@ class MLflowService:
             "success": True,
             "model_name": mv.name,
             "version": mv.version,
-            "artifact_path": mv.source
+            "artifact_path": s3_path
         }
 
     def _format_model_version(self, mv, rm) -> Dict[str, Any]:
