@@ -2,121 +2,198 @@ import os
 import json
 from django.http import JsonResponse
 from django.shortcuts import render
+from django.views import View
+from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_http_methods
 from django.conf import settings
 
-from .manager import ModelManager
-from .data_objects import Model
-def get_manager():
-    return ModelManager()
+from .services import MLflowService
 
-def register_page(request):
-    """Render the main UI page."""
-    return render(request, "index.html")
+class ModelRegistrationPageView(View):
+    def get(self, request):
+        return render(request, "index.html")
 
-@csrf_exempt
-@require_http_methods(["POST"])
-def register_model(request):
-    model_file = request.FILES.get("model")
-    model_name = request.POST.get("model_name", "").strip()
-    
-    if not model_file:
-        return JsonResponse({"success": False, "error": "No model file uploaded."}, status=400)
-    if not model_name:
-        return JsonResponse({"success": False, "error": "Model name is required."}, status=400)
+@method_decorator(csrf_exempt, name='dispatch')
+class ModelRegistrationAPIView(View):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.service = MLflowService()
+
+    def post(self, request):
+        model_file = request.FILES.get("model")
+        model_name = request.POST.get("model_name", "").strip()
         
-    try:
-        model_type = request.POST.get('model_type', 'Unknown').strip()
-        accuracy = float(request.POST.get('accuracy', 0.0))
-        architecture = request.POST.get('architecture', '').strip()
-        priority_str = request.POST.get('priority', '').strip()
-        priority = int(priority_str) if priority_str.isdigit() else None
-        is_deployable = request.POST.get('is_deployable', '').lower() in ['true', 'on', '1']
-        purpose = request.POST.get('purpose', '').strip()
-        
-        temp_dir = os.path.join(settings.BASE_DIR, 'scratch')
-        os.makedirs(temp_dir, exist_ok=True)
-        file_path = os.path.join(temp_dir, model_file.name)
-        
-        with open(file_path, 'wb+') as destination:
-            for chunk in model_file.chunks():
-                destination.write(chunk)
-
-        try:
-            model_data = Model(
-                name=model_name,
-                model_type=model_type,
-                purpose=purpose,
-                architecture=architecture,
-                accuracy=accuracy,
-                priority=priority,
-                is_deployable=is_deployable
-            )
-            # Simulated current user
-            user = "authorized_user"
-            result = get_manager().registerModel(
-                file_path=file_path,
-                original_filename=model_file.name,
-                user=user,
-                model=model_data
-            )
-            return JsonResponse(result)
-        finally:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                
-    except Exception as e:
-        return JsonResponse({"success": False, "error": str(e)}, status=500)
-
-@require_http_methods(["GET"])
-def list_models(request):
-    try:
-        models = get_manager().listModels()
-        data = [m.__dict__ for m in models]
-        return JsonResponse({"success": True, "models": data})
-    except Exception as e:
-        return JsonResponse({"success": False, "error": str(e)}, status=500)
-
-@require_http_methods(["GET"])
-def find_model(request):
-    purpose = request.GET.get('purpose', '')
-    try:
-        models = get_manager().findModel(purpose)
-        data = [m.__dict__ for m in models]
-        return JsonResponse({"success": True, "models": data})
-    except Exception as e:
-        return JsonResponse({"success": False, "error": str(e)}, status=500)
-
-@require_http_methods(["GET"])
-def list_purposes(request):
-    try:
-        purposes = get_manager().getPurposes()
-        return JsonResponse({"success": True, "purposes": purposes})
-    except Exception as e:
-        return JsonResponse({"success": False, "error": str(e)}, status=500)
-
-@csrf_exempt
-@require_http_methods(["POST", "PUT"])
-def update_model(request):
-    try:
-        data = json.loads(request.body)
-        user = "authorized_user"
-        model_id = data.pop('id', None)
-        if not model_id:
-            return JsonResponse({"success": False, "error": "Model ID is required for update."}, status=400)
+        if not model_file:
+            return JsonResponse({"success": False, "error": "No model file uploaded."}, status=400)
+        if not model_name:
+            return JsonResponse({"success": False, "error": "Model name is required."}, status=400)
             
-        updated_model = get_manager().updateModel(user, model_id, data)
-        return JsonResponse({"success": True, "model": updated_model.__dict__})
-    except Exception as e:
-        return JsonResponse({"success": False, "error": str(e)}, status=500)
+        try:
+            # Gather metadata
+            metadata = {
+                "model_name": model_name,
+                "model_type": request.POST.get('model_type', 'Unknown').strip(),
+                "architecture": request.POST.get('architecture', '').strip(),
+                "model_subtype": request.POST.get('model_subtype', '').strip(),
+                "language": request.POST.get('language', '').strip(),
+                "environment": request.POST.get('environment', '').strip(),
+                "priority": int(request.POST.get('priority', '').strip()) if request.POST.get('priority', '').strip().isdigit() else None,
+                "is_deployable": request.POST.get('is_deployable', '').lower() in ['true', 'on', '1'],
+                "purpose": request.POST.get('purpose', '').strip(),
+                "deployment_points": request.POST.getlist('deployment_points'),
+                "remarks": request.POST.get('remarks', '').strip()
+            }
+            
+            # Accuracy
+            accuracy_str = request.POST.get('accuracy', '').strip()
+            try:
+                metadata["accuracy"] = float(accuracy_str) if accuracy_str else 0.0
+            except ValueError:
+                return JsonResponse({"success": False, "error": "Accuracy must be a valid number."}, status=400)
+                
+            if metadata["accuracy"] < 0.0 or metadata["accuracy"] > 100.0:
+                return JsonResponse({"success": False, "error": "Accuracy must be between 0 and 100."}, status=400)
 
-@csrf_exempt
-@require_http_methods(["DELETE"])
-def delete_model(request, mlflow_name, version):
-    try:
-        user = "authorized_user"
-        success = get_manager().deleteModel(user, mlflow_name, int(version))
-        return JsonResponse({"success": success})
-    except Exception as e:
-        return JsonResponse({"success": False, "error": str(e)}, status=500)
+            # Automatic subtype logic from old code (can be moved to service later, keeping here for now)
+            if metadata["model_type"] == "NER":
+                metadata["model_subtype"] = "Text Pipeline"
+                metadata["language"] = ""
+                metadata["environment"] = ""
+            elif metadata["model_type"] == "FileClassifier":
+                metadata["model_subtype"] = "UIS"
+                metadata["language"] = ""
+                metadata["environment"] = ""
+            elif metadata["model_type"] != "Speech":
+                metadata["language"] = ""
+                metadata["environment"] = ""
+
+            # Temporarily save file to disk
+            temp_dir = os.path.join(settings.BASE_DIR, 'scratch')
+            os.makedirs(temp_dir, exist_ok=True)
+            file_path = os.path.join(temp_dir, model_file.name)
+            
+            with open(file_path, 'wb+') as destination:
+                for chunk in model_file.chunks():
+                    destination.write(chunk)
+
+            try:
+                # Delegate to MLflowService
+                result = self.service.register_model(
+                    local_file_path=file_path,
+                    original_filename=model_file.name,
+                    metadata=metadata
+                )
+                return JsonResponse(result)
+            finally:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    
+        except Exception as e:
+            return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+class ModelsAPIView(View):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.service = MLflowService()
+
+    def get(self, request):
+        try:
+            models = self.service.list_models()
+            return JsonResponse({"success": True, "models": models})
+        except Exception as e:
+            return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+class FindModelAPIView(View):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.service = MLflowService()
+
+    def get(self, request):
+        purpose = request.GET.get('purpose', '')
+        try:
+            models = self.service.find_models(purpose)
+            return JsonResponse({"success": True, "models": models})
+        except Exception as e:
+            return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+@method_decorator(csrf_exempt, name='dispatch')
+class UpdateModelAPIView(View):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.service = MLflowService()
+
+    def post(self, request):
+        return self.put(request)
+
+    def put(self, request):
+        try:
+            data = json.loads(request.body)
+            # Find the ID logic: frontend currently sends 'id' which might be DB ID.
+            # Wait, if we removed DB ID, the frontend might be sending name and version.
+            # We need name and version to update via MLflow.
+            name = data.get("name")
+            version = data.get("version")
+            if not name or not version:
+                return JsonResponse({"success": False, "error": "Model name and version are required for update."}, status=400)
+                
+            self.service.update_model_version(name, int(version), data)
+            updated_model = self.service.get_model_version(name, int(version))
+            return JsonResponse({"success": True, "model": updated_model})
+        except Exception as e:
+            return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+@method_decorator(csrf_exempt, name='dispatch')
+class DeleteModelAPIView(View):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.service = MLflowService()
+
+    def delete(self, request, mlflow_name, version):
+        try:
+            success = self.service.delete_model_version(mlflow_name, int(version))
+            return JsonResponse({"success": success})
+        except Exception as e:
+            return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+class PurposesAPIView(View):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.service = MLflowService()
+
+    def get(self, request):
+        try:
+            purposes = self.service.list_purposes()
+            return JsonResponse({"success": True, "purposes": purposes})
+        except Exception as e:
+            return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+class ArchitecturesAPIView(View):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.service = MLflowService()
+
+    def get(self, request):
+        try:
+            architectures = self.service.list_architectures()
+            return JsonResponse({"success": True, "architectures": architectures})
+        except Exception as e:
+            return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+# Stubs for deprecated/missing endpoints that might be called
+class LanguagesAPIView(View):
+    def get(self, request):
+        return JsonResponse({"success": True, "languages": []})
+
+class EnvironmentsAPIView(View):
+    def get(self, request):
+        return JsonResponse({"success": True, "environments": []})
+
+@method_decorator(csrf_exempt, name='dispatch')
+class SetDeployedVersionAPIView(View):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.service = MLflowService()
+        
+    def post(self, request):
+        # Could use MLflow alias "champion" in the future
+        return JsonResponse({"success": True})

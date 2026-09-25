@@ -15,3 +15,5 @@ registration/test_models/venv/
 registration/test_models/*.onnx
 registration/test_models/*.pt
 registration/test_models/*.data
+node_modules/
+registration/scratch/

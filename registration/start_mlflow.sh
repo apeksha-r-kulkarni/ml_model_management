@@ -53,7 +53,7 @@ PG_URI="postgresql://${DB_USER}:${ENCODED_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_N
 echo "Starting MLflow server with PostgreSQL backend..."
 mlflow server \
     --backend-store-uri "${PG_URI}" \
-    --default-artifact-root "s3://${MINIO_BUCKET}" \
+    --artifacts-destination "s3://${MINIO_BUCKET}" \
     --serve-artifacts \
     --host 127.0.0.1 \
     --port 5000
