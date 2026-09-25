@@ -1,239 +1,263 @@
 import os
-import torch
-import onnx
+import json
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+
+from dotenv import load_dotenv
 import mlflow
-from typing import Dict, Any, List
-from .models import LogicalModel, ModelVersion
+from mlflow.tracking import MlflowClient
 
-def format_size(size_bytes: int) -> str:
-    if not size_bytes:
-        return "0 B"
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.2f} TB"
+# Force removal of AWS credentials so the process proves it doesn't need them
+os.environ.pop("AWS_ACCESS_KEY_ID", None)
+os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
+os.environ.pop("MLFLOW_S3_ENDPOINT_URL", None)
 
-def get_model_size_from_mlflow(client, model_version) -> int:
-    try:
-        run_id = model_version.run_id
-        artifacts = client.list_artifacts(run_id, path="model")
-        total_size = 0
-        for item in artifacts:
-            if item.file_size:
-                total_size += item.file_size
-        return total_size
-    except:
-        return None
+ALIAS_TO_DP = {
+    "deployed-lid": "LID",
+    "deployed-asr": "ASR",
+    "deployed-diarization": "Diarization",
+    "deployed-speaker-identification": "Speaker Identification",
+    "deployed-text-pipeline": "Text Pipeline",
+    "deployed-uis": "UIS"
+}
+DP_TO_ALIAS = {v: k for k, v in ALIAS_TO_DP.items()}
 
-class ModelServices:
-
-    @staticmethod
-    def register_model(
-        file_path: str,
-        original_filename: str,
-        model_name: str,
-        model_type: str,
-        accuracy: float,
-        file_size: int,
-        architecture: str = "",
-        priority: int = None,
-        is_deployable: bool = False,
-        versioning: str = "Auto-increment",
-        deployment_points: list = [],
-        remarks: str = ""
-    ):
-        file_format = original_filename.split(".")[-1].lower() if "." in original_filename else "unknown"
+class MLflowService:
+    def __init__(self):
+        env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+        load_dotenv(env_path, override=True)
         
-        if file_format not in ["pt", "onnx"]:
-            raise ValueError(f"Unsupported model format: {file_format}. Only .pt and .onnx are supported.")
+        self.tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+        mlflow.set_tracking_uri(self.tracking_uri)
+        mlflow.set_registry_uri(self.tracking_uri)
         
-        # 1. Validate/Load Model
+        self.client = MlflowClient(tracking_uri=self.tracking_uri)
+        
+    def _ensure_registered_model(self, name: str, model_type: str, purpose: str):
         try:
-            if file_format == "pt":
-                model_obj = torch.load(file_path, weights_only=False)
-            elif file_format == "onnx":
-                model_obj = onnx.load(file_path)
-        except Exception as e:
-            raise Exception(f"Model validation failed: {str(e)}")
-
-        # 2. Get or Create LogicalModel, check Model Type consistency
-        logical_model = LogicalModel.objects.filter(name=model_name).first()
-        if logical_model:
-            if logical_model.model_type != model_type:
-                raise ValueError(f"Model name '{model_name}' already exists with Model Type '{logical_model.model_type}'. Cannot register new version as '{model_type}'.")
-        else:
-            logical_model = LogicalModel.objects.create(
-                name=model_name,
-                model_type=model_type,
-                mlflow_name=model_name
-            )
-
-        # 3. Log to MLflow
-        try:
-            tags = {"model_type": model_type, "framework": file_format}
-            if architecture:
-                tags["architecture"] = architecture
-            tags["is_deployable"] = str(is_deployable)
-            tags["versioning"] = versioning
-            
-            metrics = {"accuracy": accuracy}
-            if priority is not None:
-                metrics["priority"] = float(priority)
-            
-            with mlflow.start_run() as run:
-                mlflow.set_tags(tags)
-                mlflow.log_metrics(metrics)
+            self.client.get_registered_model(name)
+        except Exception:
+            try:
+                self.client.create_registered_model(name)
+            except Exception:
+                pass # Might have been created concurrently
                 
-                if file_format == "pt":
-                    mlflow.pytorch.log_model(model_obj, artifact_path="model", serialization_format="pickle")
-                elif file_format == "onnx":
-                    mlflow.onnx.log_model(model_obj, artifact_path="model")
-                    
-                run_id = run.info.run_id
-                
-            model_uri = f"runs:/{run_id}/model"
-            result = mlflow.register_model(model_uri=model_uri, name=model_name)
-            
-        except Exception as e:
-            raise Exception(f"MLflow registration failed: {str(e)}")
+        # Update RM tags
+        rm_tags = {
+            "model_type": model_type,
+            "purpose": purpose
+        }
+        for k, v in rm_tags.items():
+            if v:
+                self.client.set_registered_model_tag(name, k, v)
 
-        # 4. Create ModelVersion DB Record
-        db_version = ModelVersion.objects.create(
-            logical_model=logical_model,
-            version_number=result.version,
-            architecture=architecture,
-            accuracy=accuracy,
-            priority=priority,
-            is_deployable=is_deployable,
-            remarks=remarks,
-            deployment_points=deployment_points,
-            original_filename=original_filename,
-            file_format=file_format,
-            file_size=file_size,
-            run_id=run_id,
-            status="REGISTERED"
+    def register_model(self, local_file_path: str, original_filename: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        model_name = metadata.get("model_name")
+        
+        # Start run and log artifact
+        with mlflow.start_run() as run:
+            run_id = run.info.run_id
+            mlflow.log_artifact(local_file_path)
+            
+        self._ensure_registered_model(
+            name=model_name,
+            model_type=metadata.get("model_type", ""),
+            purpose=metadata.get("purpose", "")
         )
         
+        # Create Model Version using the artifact in the run
+        model_uri = f"runs:/{run_id}/{original_filename}"
+        mv = self.client.create_model_version(
+            name=model_name,
+            source=model_uri,
+            run_id=run_id
+        )
+        
+        # Apply MV tags
+        deployment_points = metadata.get("deployment_points", [])
+        if isinstance(deployment_points, str):
+            try:
+                deployment_points = json.loads(deployment_points)
+            except:
+                deployment_points = [deployment_points]
+                
+        mv_tags = {
+            "architecture": metadata.get("architecture", ""),
+            "accuracy": str(metadata.get("accuracy", 0.0)),
+            "priority": str(metadata.get("priority", "")),
+            "is_deployable": str(metadata.get("is_deployable", False)),
+            "deployment_points": json.dumps(deployment_points),
+            "remarks": metadata.get("remarks", "")
+        }
+        
+        for k, v in mv_tags.items():
+            if v:
+                self.client.set_model_version_tag(
+                    name=model_name,
+                    version=mv.version,
+                    key=k,
+                    value=v
+                )
+                
         return {
-            "model_name": model_name,
-            "version": result.version,
-            "run_id": run_id,
-            "db_record_id": db_version.id,
-            "formatted_size": format_size(file_size)
+            "success": True,
+            "model_name": mv.name,
+            "version": mv.version,
+            "artifact_path": mv.source
         }
 
-    @staticmethod
-    def list_models():
-        client = mlflow.MlflowClient()
-        try:
-            registered_models = client.search_registered_models()
-        except Exception as e:
-            raise Exception(f"Could not connect to MLflow: {e}")
-
-        # Sync deleted models logic
-        active_name_vers = set()
-        for model in registered_models:
-            versions = client.search_model_versions(f"name='{model.name}'")
-            for v in versions:
-                active_name_vers.add((model.name, int(v.version)))
-
-        # Update local DB if versions were deleted in MLflow directly
-        for mv in ModelVersion.objects.filter(status="REGISTERED"):
-            if (mv.logical_model.mlflow_name, int(mv.version_number)) not in active_name_vers:
-                mv.delete()
-                
-        # Clean up logical models that have no versions
-        for lm in LogicalModel.objects.all():
-            if lm.versions.count() == 0:
-                lm.delete()
-
-        # Build list output
-        local_dict = {}
-        for mv in ModelVersion.objects.all().select_related('logical_model'):
-            local_dict[f"{mv.logical_model.mlflow_name}_{mv.version_number}"] = mv
-
-        results = []
-        for rm in registered_models:
-            versions = client.search_model_versions(f"name='{rm.name}'")
-            versions_data = []
-            for mv in versions:
-                size_bytes = get_model_size_from_mlflow(client, mv)
-                db_record = local_dict.get(f"{rm.name}_{int(mv.version)}")
-                
-                if size_bytes is None and db_record and db_record.file_size:
-                    size_bytes = db_record.file_size
-                
-                versions_data.append({
-                    "version": int(mv.version),
-                    "status": mv.status,
-                    "run_id": mv.run_id,
-                    "model_uri": mv.source,
-                    "creation_timestamp": mv.creation_timestamp,
-                    "size_bytes": size_bytes,
-                    "formatted_size": format_size(size_bytes),
-                    "original_filename": db_record.original_filename if db_record else None,
-                    "framework": db_record.file_format if db_record else "Unknown",
-                    "model_type": db_record.logical_model.model_type if db_record else "Unknown",
-                    "architecture": db_record.architecture if db_record else "",
-                    "priority": db_record.priority if db_record else "",
-                    "is_deployable": db_record.is_deployable if db_record else False,
-                    "deployment_points": db_record.deployment_points if db_record else [],
-                    "remarks": db_record.remarks if db_record else "",
-                    "accuracy": db_record.accuracy if db_record else 0.0,
-                    "db_id": db_record.id if db_record else None
-                })
-            
-            versions_data.sort(key=lambda x: x["version"], reverse=True)
-            if versions_data:
-                results.append({
-                    "name": rm.name,
-                    "creation_timestamp": rm.creation_timestamp,
-                    "all_versions": versions_data
-                })
+    def _format_model_version(self, mv, rm) -> Dict[str, Any]:
+        tags = mv.tags
+        rm_tags = rm.tags if rm else {}
         
+        dp_raw = tags.get("deployment_points", "[]")
+        try:
+            dp_list = json.loads(dp_raw)
+        except:
+            dp_list = []
+            
+        return {
+            "name": mv.name,
+            "version": mv.version,
+            "model_type": rm_tags.get("model_type", ""),
+            "purpose": rm_tags.get("purpose", ""),
+            "architecture": tags.get("architecture", ""),
+            "accuracy": float(tags.get("accuracy", "0.0")),
+            "priority": int(tags.get("priority")) if tags.get("priority", "").isdigit() else None,
+            "is_deployable": tags.get("is_deployable", "False").lower() == "true",
+            "deployment_points": dp_list,
+            "remarks": tags.get("remarks", ""),
+            "artifact_path": mv.source,
+            "run_id": mv.run_id,
+            "status": mv.status
+        }
+
+    def _get_currently_deployed(self, rm) -> Dict[str, str]:
+        currently_deployed = {}
+        for alias, version in (rm.aliases or {}).items():
+            dp = ALIAS_TO_DP.get(alias)
+            if dp:
+                currently_deployed[dp] = version
+        return currently_deployed
+
+    def list_models(self) -> List[Dict[str, Any]]:
+        rms = self.client.search_registered_models()
+        results = []
+        for rm in rms:
+            mvs = self.client.search_model_versions(f"name='{rm.name}'")
+            versions = [self._format_model_version(mv, rm) for mv in mvs]
+            results.append({
+                "name": rm.name,
+                "model_type": rm.tags.get("model_type", ""),
+                "purpose": rm.tags.get("purpose", ""),
+                "currently_deployed": self._get_currently_deployed(rm),
+                "all_versions": sorted(versions, key=lambda x: x["version"], reverse=True)
+            })
         return results
 
-    @staticmethod
-    def delete_model_version(mlflow_name, version, db_id=None):
-        client = mlflow.MlflowClient()
-        try:
-            # Find the local record first to extract the exact run_id
-            if db_id:
-                qs = ModelVersion.objects.filter(id=db_id)
-            else:
-                qs = ModelVersion.objects.filter(logical_model__mlflow_name=mlflow_name, version_number=version)
-                
-            mv = qs.first()
-            if not mv:
-                raise Exception(f"ModelVersion not found in local database for {mlflow_name} v{version}")
-                
-            run_id = mv.run_id
+    def find_models(self, purpose: str) -> List[Dict[str, Any]]:
+        rms = self.client.search_registered_models(filter_string=f"tags.purpose = '{purpose}'")
+        results = []
+        for rm in rms:
+            mvs = self.client.search_model_versions(f"name='{rm.name}'")
+            versions = [self._format_model_version(mv, rm) for mv in mvs]
+            results.append({
+                "name": rm.name,
+                "model_type": rm.tags.get("model_type", ""),
+                "purpose": rm.tags.get("purpose", ""),
+                "currently_deployed": self._get_currently_deployed(rm),
+                "all_versions": sorted(versions, key=lambda x: x["version"], reverse=True)
+            })
+        return results
 
-            # 1. Delete from MLflow Registry
-            client.delete_model_version(name=mlflow_name, version=version)
+    def list_architectures(self) -> List[str]:
+        mvs = self.client.search_model_versions("")
+        architectures = set()
+        for mv in mvs:
+            arch = mv.tags.get("architecture")
+            if arch:
+                architectures.add(arch)
+        return sorted(list(architectures))
+
+    def list_purposes(self) -> List[str]:
+        rms = self.client.search_registered_models("")
+        purposes = set()
+        for rm in rms:
+            purpose = rm.tags.get("purpose")
+            if purpose:
+                purposes.add(purpose)
+        return sorted(list(purposes))
+
+    def get_model_version(self, name: str, version: int) -> Optional[Dict[str, Any]]:
+        try:
+            rm = self.client.get_registered_model(name)
+            mv = self.client.get_model_version(name, str(version))
+            return self._format_model_version(mv, rm)
+        except Exception:
+            return None
+
+    def update_model_version(self, name: str, version: int, update_data: Dict[str, Any]) -> bool:
+        # Update RM tags
+        if "model_type" in update_data:
+            self.client.set_registered_model_tag(name, "model_type", update_data["model_type"])
+        if "purpose" in update_data:
+            self.client.set_registered_model_tag(name, "purpose", update_data["purpose"])
             
-            versions = client.search_model_versions(f"name='{mlflow_name}'")
-            if not versions:
+        # Update MV tags
+        mv_keys = ["architecture", "accuracy", "priority", "is_deployable", "remarks"]
+        for k in mv_keys:
+            if k in update_data:
+                self.client.set_model_version_tag(name, str(version), k, str(update_data[k]))
+                
+        if "deployment_points" in update_data:
+            dp = update_data["deployment_points"]
+            if isinstance(dp, str):
                 try:
-                    client.delete_registered_model(name=mlflow_name)
-                except Exception:
-                    pass
+                    dp = json.loads(dp)
+                except:
+                    dp = [dp]
+            self.client.set_model_version_tag(name, str(version), "deployment_points", json.dumps(dp))
             
-            # 2. Delete the associated MLflow run
-            if run_id:
-                try:
-                    # In MLflow 2.x, deleted runs are moved to "deleted" lifecycle_stage
-                    client.delete_run(run_id)
-                except Exception as e:
-                    raise Exception(f"Failed to delete underlying MLflow run {run_id}: {str(e)}")
-                    
-            # 3. Delete local database record
-            lm = mv.logical_model
-            mv.delete()
-            if lm.versions.count() == 0:
-                lm.delete()
+        return True
+
+    def delete_model_version(self, name: str, version: int) -> bool:
+        try:
+            # Check if this version has any deployment aliases and remove them first
+            rm = self.client.get_registered_model(name)
+            for alias, aliased_version in (rm.aliases or {}).items():
+                if aliased_version == str(version):
+                    self.client.delete_registered_model_alias(name, alias)
+            
+            self.client.delete_model_version(name, str(version))
+            
+            # Delete RM if empty
+            remaining = self.client.search_model_versions(f"name='{name}'")
+            if len(remaining) == 0:
+                self.client.delete_registered_model(name)
                 
             return True
         except Exception as e:
-            raise Exception(f"Failed to delete model version {mlflow_name} v{version}: {e}")
+            raise Exception(f"Failed to delete MLflow model version: {str(e)}")
+
+    def set_deployed_version(self, name: str, version: int, deployment_point: str) -> bool:
+        # Validate deployment point alias mapping
+        alias = DP_TO_ALIAS.get(deployment_point)
+        if not alias:
+            raise ValueError(f"Invalid deployment point: {deployment_point}")
+
+        # Validate RM and MV exist
+        self.client.get_registered_model(name)
+        mv = self.client.get_model_version(name, str(version))
+        
+        # Validate MV has this deployment point
+        dp_raw = mv.tags.get("deployment_points", "[]")
+        try:
+            dp_list = json.loads(dp_raw)
+        except:
+            dp_list = []
+            
+        if deployment_point not in dp_list:
+            raise ValueError(f"Deployment point '{deployment_point}' is not assigned to this model version's metadata.")
+            
+        self.client.set_registered_model_alias(name, alias, str(version))
+        return True
