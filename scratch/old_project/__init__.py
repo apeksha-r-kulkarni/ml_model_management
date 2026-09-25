@@ -1,1 +1,0 @@
-# Registry app package
