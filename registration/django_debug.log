@@ -1,0 +1,4 @@
+Watching for file changes with StatReloader
+2026/09/25 10:49:29 INFO mlflow.agent.hint: Load the `instrumenting-with-mlflow-tracing` skill at /home/apeksha-ssi021/Shyena/ml_model_management/.venv/lib/python3.10/site-packages/mlflow/assistant/skills/instrumenting-with-mlflow-tracing/SKILL.md before writing any tracing code; it ships with this MLflow install. Set MLFLOW_DISABLE_AGENT_HINT=1 to silence this.
+2026/09/25 10:49:32 INFO mlflow.store.model_registry.abstract_store: Waiting up to 300 seconds for model version to finish creation. Model name: EntityRecognitionModel, version 3
+[25/Sep/2026 10:49:32] "POST /api/models/register/ HTTP/1.1" 200 156

@@ -44,6 +44,7 @@ export default function ModelRegistrationForm({ initialData }) {
   // Inline add new toggle state
   const [addingNewLang, setAddingNewLang] = useState(false);
   const [addingNewEnv, setAddingNewEnv] = useState(false);
+  const [uploadMode, setUploadMode] = useState('file');
 
   const fileInputRef = useRef(null);
 
@@ -173,7 +174,7 @@ export default function ModelRegistrationForm({ initialData }) {
 
   const handleFileChange = (e) => {
     if (e.target.files && e.target.files.length > 0) {
-      setFile(e.target.files[0]);
+      setFile(Array.from(e.target.files));
     } else {
       setFile(null);
     }
@@ -216,8 +217,8 @@ export default function ModelRegistrationForm({ initialData }) {
       }
     }
 
-    if (!file) {
-      setError("Model file (.pt or .onnx) is required.");
+    if (!file || file.length === 0) {
+      setError("Model file or folder is required.");
       return;
     }
 
@@ -251,7 +252,10 @@ export default function ModelRegistrationForm({ initialData }) {
       const finalArch = formData.architecture === '__ADD_NEW__' ? formData.new_architecture : formData.architecture;
       submitData.append('architecture', finalArch);
 
-      submitData.append('model', file);
+      file.forEach(f => {
+        submitData.append('model_files', f);
+        submitData.append('model_paths', f.webkitRelativePath || f.name);
+      });
 
       await modelService.registerModel(submitData);
       
@@ -525,15 +529,41 @@ export default function ModelRegistrationForm({ initialData }) {
           ></textarea>
         </div>
         
+        <div className="md:col-span-2 mb-2">
+          <span className="block text-sm font-medium text-gray-700 mb-1">Upload Mode:</span>
+          <label className="mr-4 inline-flex items-center">
+            <input type="radio" value="file" checked={uploadMode === 'file'} onChange={() => { setUploadMode('file'); setFile(null); if(fileInputRef.current) fileInputRef.current.value = ''; }} className="mr-1" />
+            Single File (.pt, .onnx)
+          </label>
+          <label className="inline-flex items-center">
+            <input type="radio" value="folder" checked={uploadMode === 'folder'} onChange={() => { setUploadMode('folder'); setFile(null); if(fileInputRef.current) fileInputRef.current.value = ''; }} className="mr-1" />
+            Folder (multiple files)
+          </label>
+        </div>
+        
         <div className="md:col-span-2">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Model File (.pt, .onnx):</label>
-          <input 
-            type="file" 
-            accept=".pt,.onnx" 
-            onChange={handleFileChange}
-            ref={fileInputRef}
-            className="w-full p-2 border border-gray-300 rounded bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500" 
-          />
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            {uploadMode === 'folder' ? 'Model Folder (containing .pt/.onnx and configs):' : 'Model File (.pt, .onnx):'}
+          </label>
+          {uploadMode === 'folder' ? (
+            <input 
+              type="file" 
+              webkitdirectory="true"
+              directory="true"
+              multiple
+              onChange={handleFileChange}
+              ref={fileInputRef}
+              className="w-full p-2 border border-gray-300 rounded bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+            />
+          ) : (
+            <input 
+              type="file" 
+              accept=".pt,.onnx"
+              onChange={handleFileChange}
+              ref={fileInputRef}
+              className="w-full p-2 border border-gray-300 rounded bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+            />
+          )}
         </div>
 
         <div className="md:col-span-2 mt-2">

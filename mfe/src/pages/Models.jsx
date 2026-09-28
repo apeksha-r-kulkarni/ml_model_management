@@ -16,7 +16,7 @@ export default function Models({ onAddNewVersion, onRegisterNew }) {
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 5;
+  const itemsPerPage = 6;
 
   // Edit/Delete modal state
   const [editingModel, setEditingModel] = useState(null);
@@ -55,17 +55,14 @@ export default function Models({ onAddNewVersion, onRegisterNew }) {
   }, [allModels]);
 
   // Available deployment points for filter dropdown
-  const allDeploymentPoints = useMemo(() => {
-    const set = new Set();
-    allModels.forEach(m => {
-      (m.all_versions || []).forEach(v => {
-        if (Array.isArray(v.deployment_points)) {
-          v.deployment_points.forEach(dp => set.add(dp));
-        }
-      });
-    });
-    return Array.from(set).sort();
-  }, [allModels]);
+  const allDeploymentPoints = [
+    'ASR',
+    'Diarization',
+    'LID',
+    'Speaker Identification',
+    'Text Pipeline',
+    'UIS'
+  ];
 
   // Filtered & Sorted identities
   const filteredIdentities = useMemo(() => {
@@ -103,8 +100,8 @@ export default function Models({ onAddNewVersion, onRegisterNew }) {
         valA = aName.toLowerCase();
         valB = bName.toLowerCase();
       } else if (sortBy === 'version') {
-        valA = aLatest.version;
-        valB = bLatest.version;
+        valA = parseInt(aLatest.version, 10) || 0;
+        valB = parseInt(bLatest.version, 10) || 0;
       } else if (sortBy === 'accuracy') {
         valA = aLatest.accuracy || 0;
         valB = bLatest.accuracy || 0;

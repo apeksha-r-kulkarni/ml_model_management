@@ -1,5 +1,7 @@
 import os
 import json
+import uuid
+import shutil
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.views import View
@@ -20,11 +22,12 @@ class ModelRegistrationAPIView(View):
         self.service = MLflowService()
 
     def post(self, request):
-        model_file = request.FILES.get("model")
+        model_files = request.FILES.getlist("model_files")
+        model_paths = request.POST.getlist("model_paths")
         model_name = request.POST.get("model_name", "").strip()
         
-        if not model_file:
-            return JsonResponse({"success": False, "error": "No model file uploaded."}, status=400)
+        if not model_files:
+            return JsonResponse({"success": False, "error": "No model files uploaded."}, status=400)
         if not model_name:
             return JsonResponse({"success": False, "error": "Model name is required."}, status=400)
             
@@ -67,26 +70,37 @@ class ModelRegistrationAPIView(View):
                 metadata["language"] = ""
                 metadata["environment"] = ""
 
-            # Temporarily save file to disk
-            temp_dir = os.path.join(settings.BASE_DIR, 'scratch')
+            # Temporarily save folder to disk
+            temp_dir = os.path.join(settings.BASE_DIR, 'scratch', 'model_uploads')
             os.makedirs(temp_dir, exist_ok=True)
-            file_path = os.path.join(temp_dir, model_file.name)
             
-            with open(file_path, 'wb+') as destination:
-                for chunk in model_file.chunks():
-                    destination.write(chunk)
-
+            upload_id = str(uuid.uuid4())
+            upload_dir = os.path.join(temp_dir, upload_id)
+            os.makedirs(upload_dir, exist_ok=True)
+            
             try:
+                for f, relative_path in zip(model_files, model_paths):
+                    # Ensure safe path
+                    safe_path = os.path.normpath(relative_path).lstrip('/')
+                    if '..' in safe_path:
+                        continue
+                        
+                    file_path = os.path.join(upload_dir, safe_path)
+                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                    
+                    with open(file_path, 'wb+') as destination:
+                        for chunk in f.chunks():
+                            destination.write(chunk)
+
                 # Delegate to MLflowService
-                result = self.service.register_model(
-                    local_file_path=file_path,
-                    original_filename=model_file.name,
+                result = self.service.register_model_folder(
+                    local_dir=upload_dir,
                     metadata=metadata
                 )
                 return JsonResponse(result)
             finally:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
+                if os.path.exists(upload_dir):
+                    shutil.rmtree(upload_dir, ignore_errors=True)
                     
         except Exception as e:
             return JsonResponse({"success": False, "error": str(e)}, status=500)

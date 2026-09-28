@@ -51,40 +51,70 @@ class MLflowService:
             if v:
                 self.client.set_registered_model_tag(name, k, v)
 
-    def register_model(self, local_file_path: str, original_filename: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    def register_model_folder(self, local_dir: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
         model_name = metadata.get("model_name")
         
         # Ensure experiment exists for this model to group its artifacts
         exp_name = model_name
-        artifact_loc = f"mlflow-artifacts:/models/{model_name}"
-        
         try:
-            exp_id = self.client.create_experiment(exp_name, artifact_location=artifact_loc)
+            exp_id = self.client.create_experiment(exp_name)
         except Exception:
-            try:
-                exp_id = self.client.get_experiment_by_name(exp_name).experiment_id
-            except Exception as e:
-                raise Exception(f"Failed to get or create MLflow experiment for model {model_name}: {str(e)}")
+            exp = self.client.get_experiment_by_name(exp_name)
+            if exp:
+                if exp.lifecycle_stage != 'active':
+                    self.client.restore_experiment(exp.experiment_id)
+                exp_id = exp.experiment_id
+            else:
+                raise Exception(f"Failed to create or get experiment '{exp_name}'")
                 
-        # Start run within this specific experiment and log artifact
-        with mlflow.start_run(experiment_id=exp_id) as run:
-            run_id = run.info.run_id
-            mlflow.log_artifact(local_file_path)
-            
         self._ensure_registered_model(
             name=model_name,
             model_type=metadata.get("model_type", ""),
             purpose=metadata.get("purpose", "")
         )
         
-        # Create Model Version using the artifact in the run
-        model_uri = f"runs:/{run_id}/{original_filename}"
+        import boto3
+        bucket = os.environ.get("MINIO_BUCKET")
+        ignore_tls = os.environ.get("MLFLOW_S3_IGNORE_TLS", "false").lower() in ["true", "1"]
+        
+        s3 = boto3.client(
+            's3',
+            endpoint_url="http://" + os.environ.get("MINIO_ENDPOINT") if not (os.environ.get("MINIO_SECURE", "false").lower() in ["true", "1"]) else "https://" + os.environ.get("MINIO_ENDPOINT"),
+            aws_access_key_id=os.environ.get("MINIO_ACCESS_KEY") or os.environ.get("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.environ.get("MINIO_SECRET_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY"),
+            verify=not ignore_tls
+        )
+        
+        with mlflow.start_run(experiment_id=exp_id) as run:
+            run_id = run.info.run_id
+            
+        # Create the model version with a dummy source to secure the actual version number
+        dummy_source = f"s3://{bucket}/{model_name}/django_managed_artifacts_{run_id}"
+        
         mv = self.client.create_model_version(
             name=model_name,
-            source=model_uri,
+            source=dummy_source,
             run_id=run_id
         )
         
+        actual_version = mv.version
+        expected_s3_path = f"s3://{bucket}/{model_name}/v{actual_version}"
+        
+        try:
+            # Upload folder directly to MinIO using the actual assigned version
+            for root, _, files in os.walk(local_dir):
+                for file in files:
+                    local_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(local_path, local_dir)
+                    s3_key = f"{model_name}/v{actual_version}/{rel_path}".replace("\\", "/")
+                    s3.upload_file(local_path, bucket, s3_key)
+        except Exception as e:
+            # Rollback if upload fails
+            self.client.delete_model_version(model_name, actual_version)
+            if run_id:
+                self.client.delete_run(run_id)
+            raise Exception(f"Failed to upload model folder to MinIO: {e}")
+            
         # Apply MV tags
         deployment_points = metadata.get("deployment_points", [])
         if isinstance(deployment_points, str):
@@ -100,7 +130,7 @@ class MLflowService:
             "is_deployable": str(metadata.get("is_deployable", False)),
             "deployment_points": json.dumps(deployment_points),
             "remarks": metadata.get("remarks", ""),
-            "artifact_path": model_uri
+            "artifact_path": expected_s3_path
         }
         
         for k, v in mv_tags.items():
@@ -164,7 +194,7 @@ class MLflowService:
                 "model_type": rm.tags.get("model_type", ""),
                 "purpose": rm.tags.get("purpose", ""),
                 "currently_deployed": self._get_currently_deployed(rm),
-                "all_versions": sorted(versions, key=lambda x: x["version"], reverse=True)
+                "all_versions": sorted(versions, key=lambda x: int(x["version"]), reverse=True)
             })
         return results
 
@@ -179,7 +209,7 @@ class MLflowService:
                 "model_type": rm.tags.get("model_type", ""),
                 "purpose": rm.tags.get("purpose", ""),
                 "currently_deployed": self._get_currently_deployed(rm),
-                "all_versions": sorted(versions, key=lambda x: x["version"], reverse=True)
+                "all_versions": sorted(versions, key=lambda x: int(x["version"]), reverse=True)
             })
         return results
 
