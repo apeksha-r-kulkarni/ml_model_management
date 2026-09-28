@@ -2,15 +2,14 @@ import os
 import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from abc import ABC, abstractmethod
 
 from dotenv import load_dotenv
 import mlflow
 from mlflow.tracking import MlflowClient
+import boto3
 
-# Force removal of AWS credentials so the process proves it doesn't need them
-os.environ.pop("AWS_ACCESS_KEY_ID", None)
-os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
-os.environ.pop("MLFLOW_S3_ENDPOINT_URL", None)
+# AWS credentials pop removed
 
 ALIAS_TO_DP = {
     "deployed-lid": "LID",
@@ -22,7 +21,74 @@ ALIAS_TO_DP = {
 }
 DP_TO_ALIAS = {v: k for k, v in ALIAS_TO_DP.items()}
 
-class MLflowService:
+
+# -----------------------------------------------------------------------------
+# ADAPTER INTERFACES
+# -----------------------------------------------------------------------------
+
+class ModelRegistryAdapter(ABC):
+    @abstractmethod
+    def create_experiment(self, name: str) -> str: pass
+    
+    @abstractmethod
+    def ensure_registered_model(self, name: str, model_type: str, purpose: str): pass
+
+    @abstractmethod
+    def create_model_version(self, name: str, source: str, run_id: str) -> Any: pass
+    
+    @abstractmethod
+    def delete_model_version(self, name: str, version: str): pass
+    
+    @abstractmethod
+    def delete_run(self, run_id: str): pass
+    
+    @abstractmethod
+    def set_model_version_tag(self, name: str, version: str, key: str, value: str): pass
+    
+    @abstractmethod
+    def search_registered_models(self, filter_string: str = "") -> List[Any]: pass
+    
+    @abstractmethod
+    def search_model_versions(self, filter_string: str) -> List[Any]: pass
+    
+    @abstractmethod
+    def get_registered_model(self, name: str) -> Any: pass
+    
+    @abstractmethod
+    def get_model_version(self, name: str, version: str) -> Any: pass
+    
+    @abstractmethod
+    def set_registered_model_tag(self, name: str, key: str, value: str): pass
+    
+    @abstractmethod
+    def set_registered_model_alias(self, name: str, alias: str, version: str): pass
+    
+    @abstractmethod
+    def delete_registered_model_alias(self, name: str, alias: str): pass
+    
+    @abstractmethod
+    def delete_registered_model(self, name: str): pass
+    
+    @abstractmethod
+    def start_run(self, experiment_id: str) -> Any: pass
+
+
+class ArtifactStorageAdapter(ABC):
+    @abstractmethod
+    def upload_folder(self, local_dir: str, prefix: str): pass
+    
+    @abstractmethod
+    def delete_folder(self, prefix: str): pass
+    
+    @abstractmethod
+    def get_bucket(self) -> str: pass
+
+
+# -----------------------------------------------------------------------------
+# IMPLEMENTATIONS
+# -----------------------------------------------------------------------------
+
+class MLflowAdapter(ModelRegistryAdapter):
     def __init__(self):
         env_path = Path(__file__).resolve().parent.parent.parent / ".env"
         load_dotenv(env_path, override=True)
@@ -32,8 +98,20 @@ class MLflowService:
         mlflow.set_registry_uri(self.tracking_uri)
         
         self.client = MlflowClient(tracking_uri=self.tracking_uri)
-        
-    def _ensure_registered_model(self, name: str, model_type: str, purpose: str):
+
+    def create_experiment(self, name: str) -> str:
+        try:
+            return self.client.create_experiment(name)
+        except Exception:
+            exp = self.client.get_experiment_by_name(name)
+            if exp:
+                if exp.lifecycle_stage != 'active':
+                    self.client.restore_experiment(exp.experiment_id)
+                return exp.experiment_id
+            else:
+                raise Exception(f"Failed to create or get experiment '{name}'")
+
+    def ensure_registered_model(self, name: str, model_type: str, purpose: str):
         try:
             self.client.get_registered_model(name)
         except Exception:
@@ -51,47 +129,137 @@ class MLflowService:
             if v:
                 self.client.set_registered_model_tag(name, k, v)
 
+    def create_model_version(self, name: str, source: str, run_id: str) -> Any:
+        return self.client.create_model_version(name=name, source=source, run_id=run_id)
+
+    def delete_model_version(self, name: str, version: str):
+        self.client.delete_model_version(name, version)
+
+    def delete_run(self, run_id: str):
+        self.client.delete_run(run_id)
+
+    def set_model_version_tag(self, name: str, version: str, key: str, value: str):
+        self.client.set_model_version_tag(name, version, key, value)
+
+    def search_registered_models(self, filter_string: str = "") -> List[Any]:
+        return self.client.search_registered_models(filter_string=filter_string)
+
+    def search_model_versions(self, filter_string: str) -> List[Any]:
+        return self.client.search_model_versions(filter_string=filter_string)
+
+    def get_registered_model(self, name: str) -> Any:
+        return self.client.get_registered_model(name)
+
+    def get_model_version(self, name: str, version: str) -> Any:
+        return self.client.get_model_version(name, version)
+
+    def set_registered_model_tag(self, name: str, key: str, value: str):
+        self.client.set_registered_model_tag(name, key, value)
+
+    def set_registered_model_alias(self, name: str, alias: str, version: str):
+        self.client.set_registered_model_alias(name, alias, version)
+
+    def delete_registered_model_alias(self, name: str, alias: str):
+        self.client.delete_registered_model_alias(name, alias)
+
+    def delete_registered_model(self, name: str):
+        self.client.delete_registered_model(name)
+
+    def start_run(self, experiment_id: str) -> Any:
+        return mlflow.start_run(experiment_id=experiment_id)
+
+
+class MinIOAdapter(ArtifactStorageAdapter):
+    def __init__(self):
+        env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+        load_dotenv(env_path, override=True)
+        
+        self.bucket = os.environ.get("MINIO_BUCKET")
+        ignore_tls = os.environ.get("MLFLOW_S3_IGNORE_TLS", "false").lower() in ["true", "1"]
+        
+        self.s3 = boto3.client(
+            's3',
+            endpoint_url="http://" + os.environ.get("MINIO_ENDPOINT") if not (os.environ.get("MINIO_SECURE", "false").lower() in ["true", "1"]) else "https://" + os.environ.get("MINIO_ENDPOINT"),
+            aws_access_key_id=os.environ.get("MINIO_ACCESS_KEY"),
+            aws_secret_access_key=os.environ.get("MINIO_SECRET_KEY"),
+            verify=not ignore_tls
+        )
+        
+    def get_bucket(self) -> str:
+        return self.bucket
+
+    def upload_folder(self, local_dir: str, prefix: str):
+        for root, _, files in os.walk(local_dir):
+            for file in files:
+                local_path = os.path.join(root, file)
+                rel_path = os.path.relpath(local_path, local_dir)
+                s3_key = f"{prefix}/{rel_path}".replace("\\", "/")
+                self.s3.upload_file(local_path, self.bucket, s3_key)
+                
+    def delete_folder(self, prefix: str):
+        # List and delete all objects with the given prefix
+        paginator = self.s3.get_paginator('list_objects_v2')
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            if 'Contents' in page:
+                delete_keys = {'Objects': [{'Key': obj['Key']} for obj in page['Contents']]}
+                self.s3.delete_objects(Bucket=self.bucket, Delete=delete_keys)
+
+
+# -----------------------------------------------------------------------------
+# DAO
+# -----------------------------------------------------------------------------
+
+class ModelDAO:
+    def __init__(self, registry_adapter: ModelRegistryAdapter, storage_adapter: ArtifactStorageAdapter):
+        self.registry = registry_adapter
+        self.storage = storage_adapter
+        
+    def create_experiment(self, name: str) -> str: return self.registry.create_experiment(name)
+    def ensure_registered_model(self, name: str, model_type: str, purpose: str): return self.registry.ensure_registered_model(name, model_type, purpose)
+    def start_run(self, experiment_id: str): return self.registry.start_run(experiment_id)
+    def create_model_version(self, name: str, source: str, run_id: str) -> Any: return self.registry.create_model_version(name, source, run_id)
+    def set_model_version_tag(self, name: str, version: str, key: str, value: str): return self.registry.set_model_version_tag(name, version, key, value)
+    def delete_model_version(self, name: str, version: str): return self.registry.delete_model_version(name, version)
+    def delete_run(self, run_id: str): return self.registry.delete_run(run_id)
+    def search_registered_models(self, filter_string: str = "") -> List[Any]: return self.registry.search_registered_models(filter_string)
+    def search_model_versions(self, filter_string: str) -> List[Any]: return self.registry.search_model_versions(filter_string)
+    def get_registered_model(self, name: str) -> Any: return self.registry.get_registered_model(name)
+    def get_model_version(self, name: str, version: str) -> Any: return self.registry.get_model_version(name, version)
+    def set_registered_model_tag(self, name: str, key: str, value: str): return self.registry.set_registered_model_tag(name, key, value)
+    def set_registered_model_alias(self, name: str, alias: str, version: str): return self.registry.set_registered_model_alias(name, alias, version)
+    def delete_registered_model_alias(self, name: str, alias: str): return self.registry.delete_registered_model_alias(name, alias)
+    def delete_registered_model(self, name: str): return self.registry.delete_registered_model(name)
+    
+    def get_bucket(self) -> str: return self.storage.get_bucket()
+    def upload_folder(self, local_dir: str, prefix: str): return self.storage.upload_folder(local_dir, prefix)
+    def delete_folder(self, prefix: str): return self.storage.delete_folder(prefix)
+
+
+# -----------------------------------------------------------------------------
+# FACADE / MANAGER
+# -----------------------------------------------------------------------------
+
+class ModelManager:
+    def __init__(self, dao: ModelDAO):
+        self.dao = dao
+        
     def register_model_folder(self, local_dir: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
         model_name = metadata.get("model_name")
+        exp_id = self.dao.create_experiment(model_name)
         
-        # Ensure experiment exists for this model to group its artifacts
-        exp_name = model_name
-        try:
-            exp_id = self.client.create_experiment(exp_name)
-        except Exception:
-            exp = self.client.get_experiment_by_name(exp_name)
-            if exp:
-                if exp.lifecycle_stage != 'active':
-                    self.client.restore_experiment(exp.experiment_id)
-                exp_id = exp.experiment_id
-            else:
-                raise Exception(f"Failed to create or get experiment '{exp_name}'")
-                
-        self._ensure_registered_model(
+        self.dao.ensure_registered_model(
             name=model_name,
             model_type=metadata.get("model_type", ""),
             purpose=metadata.get("purpose", "")
         )
         
-        import boto3
-        bucket = os.environ.get("MINIO_BUCKET")
-        ignore_tls = os.environ.get("MLFLOW_S3_IGNORE_TLS", "false").lower() in ["true", "1"]
-        
-        s3 = boto3.client(
-            's3',
-            endpoint_url="http://" + os.environ.get("MINIO_ENDPOINT") if not (os.environ.get("MINIO_SECURE", "false").lower() in ["true", "1"]) else "https://" + os.environ.get("MINIO_ENDPOINT"),
-            aws_access_key_id=os.environ.get("MINIO_ACCESS_KEY") or os.environ.get("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.environ.get("MINIO_SECRET_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY"),
-            verify=not ignore_tls
-        )
-        
-        with mlflow.start_run(experiment_id=exp_id) as run:
+        with self.dao.start_run(experiment_id=exp_id) as run:
             run_id = run.info.run_id
             
-        # Create the model version with a dummy source to secure the actual version number
+        bucket = self.dao.get_bucket()
         dummy_source = f"s3://{bucket}/{model_name}/django_managed_artifacts_{run_id}"
         
-        mv = self.client.create_model_version(
+        mv = self.dao.create_model_version(
             name=model_name,
             source=dummy_source,
             run_id=run_id
@@ -99,29 +267,28 @@ class MLflowService:
         
         actual_version = mv.version
         expected_s3_path = f"s3://{bucket}/{model_name}/v{actual_version}"
+        prefix = f"{model_name}/v{actual_version}"
         
         try:
-            # Upload folder directly to MinIO using the actual assigned version
-            for root, _, files in os.walk(local_dir):
-                for file in files:
-                    local_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(local_path, local_dir)
-                    s3_key = f"{model_name}/v{actual_version}/{rel_path}".replace("\\", "/")
-                    s3.upload_file(local_path, bucket, s3_key)
+            self.dao.upload_folder(local_dir, prefix)
         except Exception as e:
-            # Rollback if upload fails
-            self.client.delete_model_version(model_name, actual_version)
+            self.dao.delete_folder(prefix)
+            self.dao.delete_model_version(model_name, actual_version)
             if run_id:
-                self.client.delete_run(run_id)
+                self.dao.delete_run(run_id)
             raise Exception(f"Failed to upload model folder to MinIO: {e}")
             
-        # Apply MV tags
         deployment_points = metadata.get("deployment_points", [])
         if isinstance(deployment_points, str):
             try:
                 deployment_points = json.loads(deployment_points)
             except:
                 deployment_points = [deployment_points]
+                
+        valid_dp = {"LID", "ASR", "Diarization", "Speaker Identification", "Text Pipeline", "UIS"}
+        for dp in deployment_points:
+            if dp not in valid_dp:
+                raise ValueError(f"Invalid deployment point: {dp}")
                 
         mv_tags = {
             "architecture": metadata.get("architecture", ""),
@@ -135,7 +302,7 @@ class MLflowService:
         
         for k, v in mv_tags.items():
             if v:
-                self.client.set_model_version_tag(
+                self.dao.set_model_version_tag(
                     name=model_name,
                     version=mv.version,
                     key=k,
@@ -146,7 +313,7 @@ class MLflowService:
             "success": True,
             "model_name": mv.name,
             "version": mv.version,
-            "artifact_path": mv.source
+            "artifact_path": expected_s3_path
         }
 
     def _format_model_version(self, mv, rm) -> Dict[str, Any]:
@@ -170,7 +337,7 @@ class MLflowService:
             "is_deployable": tags.get("is_deployable", "False").lower() == "true",
             "deployment_points": dp_list,
             "remarks": tags.get("remarks", ""),
-            "artifact_path": mv.source,
+            "artifact_path": tags.get("artifact_path", ""),
             "run_id": mv.run_id,
             "status": mv.status
         }
@@ -184,10 +351,10 @@ class MLflowService:
         return currently_deployed
 
     def list_models(self) -> List[Dict[str, Any]]:
-        rms = self.client.search_registered_models()
+        rms = self.dao.search_registered_models()
         results = []
         for rm in rms:
-            mvs = self.client.search_model_versions(f"name='{rm.name}'")
+            mvs = self.dao.search_model_versions(f"name='{rm.name}'")
             versions = [self._format_model_version(mv, rm) for mv in mvs]
             results.append({
                 "name": rm.name,
@@ -199,10 +366,10 @@ class MLflowService:
         return results
 
     def find_models(self, purpose: str) -> List[Dict[str, Any]]:
-        rms = self.client.search_registered_models(filter_string=f"tags.purpose = '{purpose}'")
+        rms = self.dao.search_registered_models(filter_string=f"tags.purpose = '{purpose}'")
         results = []
         for rm in rms:
-            mvs = self.client.search_model_versions(f"name='{rm.name}'")
+            mvs = self.dao.search_model_versions(f"name='{rm.name}'")
             versions = [self._format_model_version(mv, rm) for mv in mvs]
             results.append({
                 "name": rm.name,
@@ -214,7 +381,7 @@ class MLflowService:
         return results
 
     def list_architectures(self) -> List[str]:
-        mvs = self.client.search_model_versions("")
+        mvs = self.dao.search_model_versions("")
         architectures = set()
         for mv in mvs:
             arch = mv.tags.get("architecture")
@@ -223,7 +390,7 @@ class MLflowService:
         return sorted(list(architectures))
 
     def list_purposes(self) -> List[str]:
-        rms = self.client.search_registered_models("")
+        rms = self.dao.search_registered_models("")
         purposes = set()
         for rm in rms:
             purpose = rm.tags.get("purpose")
@@ -233,24 +400,22 @@ class MLflowService:
 
     def get_model_version(self, name: str, version: int) -> Optional[Dict[str, Any]]:
         try:
-            rm = self.client.get_registered_model(name)
-            mv = self.client.get_model_version(name, str(version))
+            rm = self.dao.get_registered_model(name)
+            mv = self.dao.get_model_version(name, str(version))
             return self._format_model_version(mv, rm)
         except Exception:
             return None
 
     def update_model_version(self, name: str, version: int, update_data: Dict[str, Any]) -> bool:
-        # Update RM tags
         if "model_type" in update_data:
-            self.client.set_registered_model_tag(name, "model_type", update_data["model_type"])
+            self.dao.set_registered_model_tag(name, "model_type", update_data["model_type"])
         if "purpose" in update_data:
-            self.client.set_registered_model_tag(name, "purpose", update_data["purpose"])
+            self.dao.set_registered_model_tag(name, "purpose", update_data["purpose"])
             
-        # Update MV tags
         mv_keys = ["architecture", "accuracy", "priority", "is_deployable", "remarks"]
         for k in mv_keys:
             if k in update_data:
-                self.client.set_model_version_tag(name, str(version), k, str(update_data[k]))
+                self.dao.set_model_version_tag(name, str(version), k, str(update_data[k]))
                 
         if "deployment_points" in update_data:
             dp = update_data["deployment_points"]
@@ -259,40 +424,42 @@ class MLflowService:
                     dp = json.loads(dp)
                 except:
                     dp = [dp]
-            self.client.set_model_version_tag(name, str(version), "deployment_points", json.dumps(dp))
+            valid_dp = {"LID", "ASR", "Diarization", "Speaker Identification", "Text Pipeline", "UIS"}
+            for p in dp:
+                if p not in valid_dp:
+                    raise ValueError(f"Invalid deployment point: {p}")
+            self.dao.set_model_version_tag(name, str(version), "deployment_points", json.dumps(dp))
             
         return True
 
     def delete_model_version(self, name: str, version: int) -> bool:
         try:
-            # Check if this version has any deployment aliases and remove them first
-            rm = self.client.get_registered_model(name)
+            rm = self.dao.get_registered_model(name)
             for alias, aliased_version in (rm.aliases or {}).items():
                 if aliased_version == str(version):
-                    self.client.delete_registered_model_alias(name, alias)
+                    self.dao.delete_registered_model_alias(name, alias)
             
-            self.client.delete_model_version(name, str(version))
+            self.dao.delete_model_version(name, str(version))
             
-            # Delete RM if empty
-            remaining = self.client.search_model_versions(f"name='{name}'")
+            # Delete artifacts from MinIO
+            self.dao.delete_folder(f"{name}/v{version}")
+            
+            remaining = self.dao.search_model_versions(f"name='{name}'")
             if len(remaining) == 0:
-                self.client.delete_registered_model(name)
+                self.dao.delete_registered_model(name)
                 
             return True
         except Exception as e:
-            raise Exception(f"Failed to delete MLflow model version: {str(e)}")
+            raise Exception(f"Failed to delete model version: {str(e)}")
 
     def set_deployed_version(self, name: str, version: int, deployment_point: str) -> bool:
-        # Validate deployment point alias mapping
         alias = DP_TO_ALIAS.get(deployment_point)
         if not alias:
             raise ValueError(f"Invalid deployment point: {deployment_point}")
 
-        # Validate RM and MV exist
-        self.client.get_registered_model(name)
-        mv = self.client.get_model_version(name, str(version))
+        self.dao.get_registered_model(name)
+        mv = self.dao.get_model_version(name, str(version))
         
-        # Validate MV has this deployment point
         dp_raw = mv.tags.get("deployment_points", "[]")
         try:
             dp_list = json.loads(dp_raw)
@@ -302,5 +469,6 @@ class MLflowService:
         if deployment_point not in dp_list:
             raise ValueError(f"Deployment point '{deployment_point}' is not assigned to this model version's metadata.")
             
-        self.client.set_registered_model_alias(name, alias, str(version))
+        self.dao.set_registered_model_alias(name, alias, str(version))
         return True
+
