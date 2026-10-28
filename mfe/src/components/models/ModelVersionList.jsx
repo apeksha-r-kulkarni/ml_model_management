@@ -1,6 +1,6 @@
 import React from 'react';
 
-export default function ModelVersionList({ versions, currentlyDeployed, onEdit, onDelete, onSetDeployed }) {
+export default function ModelVersionList({ versions, currentlyDeployed, pendingDeployments = {}, defaultVersions, deployLoading, onEdit, onDelete, onSetDeployed, onResetDeployed }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200 shadow-sm bg-white">
       <table className="w-full text-left border-collapse">
@@ -8,6 +8,7 @@ export default function ModelVersionList({ versions, currentlyDeployed, onEdit, 
           <tr className="bg-gray-100/80 border-b border-gray-200 text-xs text-gray-600 uppercase tracking-wider">
             <th className="p-3.5 font-semibold">Version</th>
             <th className="p-3.5 font-semibold">Status</th>
+            <th className="p-3.5 font-semibold">Framework</th>
             <th className="p-3.5 font-semibold">Architecture</th>
             <th className="p-3.5 font-semibold">Language/Env</th>
             <th className="p-3.5 font-semibold">Accuracy</th>
@@ -39,6 +40,7 @@ export default function ModelVersionList({ versions, currentlyDeployed, onEdit, 
                     </span>
                   )}
                 </td>
+                <td className="p-3.5 text-gray-700">{v.framework || '-'}</td>
                 <td className="p-3.5 text-gray-700">{v.architecture || '-'}</td>
                 <td className="p-3.5 text-gray-700 text-xs">
                   {v.language || v.environment ? (
@@ -49,7 +51,7 @@ export default function ModelVersionList({ versions, currentlyDeployed, onEdit, 
                     </span>
                   ) : '-'}
                 </td>
-                <td className="p-3.5 text-gray-700 font-mono text-xs">{v.accuracy || '0.0'}</td>
+                <td className="p-3.5 text-gray-700 font-mono text-xs">{v.accuracy != null ? v.accuracy : 'N/A'}</td>
                 <td className="p-3.5 text-gray-700">{v.priority ?? '-'}</td>
                 <td className="p-3.5">
                   <span className={`px-2 py-0.5 rounded text-xs font-semibold ${v.is_deployable ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
@@ -57,26 +59,68 @@ export default function ModelVersionList({ versions, currentlyDeployed, onEdit, 
                   </span>
                 </td>
                 <td className="p-3.5 text-gray-600 text-xs">
-                  {v.deployment_points && v.deployment_points.length > 0 ? (
-                    <div className="flex flex-col space-y-1">
-                      {v.deployment_points.map(dp => {
+                  {(() => {
+                    const dps = v.deployment_points || [];
+                    return dps && dps.length > 0 ? (
+                      <div className="flex flex-col space-y-1">
+                        {dps.map(dp => {
                         const isDpDeployed = currentlyDeployed && currentlyDeployed[dp] === v.version;
+                        const isDpPending = pendingDeployments && pendingDeployments[dp] === v.version;
+                        const isDefaultCandidate = defaultVersions && defaultVersions[dp] === v.version;
                         if (isDpDeployed) {
                            return (
-                             <span key={dp} className="px-2 py-0.5 rounded text-[10px] font-bold bg-green-600 text-white shadow-sm inline-block w-max">
-                               DEPLOYED: {dp}
-                             </span>
+                             <div key={dp} className="flex items-center space-x-1">
+                               <span className="px-2 py-0.5 rounded text-[10px] font-bold text-white shadow-sm inline-block w-max bg-green-600">
+                                 {`DEPLOYED: ${dp}`}
+                               </span>
+                               {onResetDeployed && (
+                                 <button 
+                                   disabled={deployLoading}
+                                   onClick={() => onResetDeployed(dp)} 
+                                   className="text-[10px] bg-red-50 text-red-600 hover:bg-red-100 disabled:opacity-50 px-1.5 py-0.5 rounded font-semibold transition-colors border border-red-200"
+                                   title="Reset Deployment"
+                                 >
+                                   Reset
+                                 </button>
+                               )}
+                             </div>
+                           );
+                        } else if (isDpPending) {
+                           return (
+                             <div key={dp} className="flex items-center space-x-1">
+                               <span className="px-2 py-0.5 rounded text-[10px] font-bold text-amber-900 shadow-sm inline-block w-max bg-amber-400 animate-pulse">
+                                 {`PENDING: ${dp}`}
+                               </span>
+                             </div>
                            );
                         } else {
                            return (
-                             <span key={dp} className="px-2 py-0.5 rounded text-[10px] font-medium bg-gray-50 text-gray-500 border border-gray-100 inline-block w-max">
-                               {dp}
-                             </span>
-                           );
-                        }
-                      })}
-                    </div>
-                  ) : '-'}
+                             <div key={dp} className="flex items-center space-x-2">
+                               <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-gray-50 text-gray-500 border border-gray-100 inline-block w-max">
+                                 {dp}
+                               </span>
+                               {isDefaultCandidate && (
+                                 <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-50 text-blue-700 border border-blue-200" title="Designated default version for this deployment point">
+                                   Default
+                                 </span>
+                               )}
+                               {v.is_deployable && (
+                                 <button 
+                                   disabled={deployLoading}
+                                   onClick={() => onSetDeployed(v.version, dp)}
+                                   className="text-[10px] bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50 px-1.5 py-0.5 rounded font-semibold transition-colors border border-blue-200"
+                                   title={`Deploy this version for ${dp}`}
+                                 >
+                                   Deploy
+                                 </button>
+                               )}
+                              </div>
+                            );
+                         }
+                       })}
+                     </div>
+                   ) : '-';
+                  })()}
                 </td>
                 <td className="p-3.5 text-gray-600 text-xs max-w-[150px] truncate" title={v.remarks}>
                   {v.remarks || '-'}

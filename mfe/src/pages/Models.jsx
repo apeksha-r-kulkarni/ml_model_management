@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { modelService } from '../services/modelService';
 import ModelCard from '../components/models/ModelCard';
+import DeploymentHistoryModal from '../components/models/DeploymentHistoryModal';
 
 export default function Models({ onAddNewVersion, onRegisterNew }) {
   const [allModels, setAllModels] = useState([]);
@@ -27,6 +28,23 @@ export default function Models({ onAddNewVersion, onRegisterNew }) {
   const [deletingModel, setDeletingModel] = useState(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
+
+  // Model-first Deployment Selection state
+  const [deploySelectedModel, setDeploySelectedModel] = useState('');
+  const [deploySelectedPoint, setDeploySelectedPoint] = useState('Text Pipeline');
+  const [deploySelectedVersion, setDeploySelectedVersion] = useState('');
+  const [deployActionLoading, setDeployActionLoading] = useState(false);
+  const [deployActionMsg, setDeployActionMsg] = useState(null);
+  const [pendingDeployment, setPendingDeployment] = useState(null);
+
+  // Deployment Audit History modal state
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
+  const [historySelectedModel, setHistorySelectedModel] = useState('');
+
+  const handleOpenHistory = (modelName = '') => {
+    setHistorySelectedModel(modelName);
+    setHistoryModalOpen(true);
+  };
 
   const fetchModels = async () => {
     setLoading(true);
@@ -145,6 +163,8 @@ export default function Models({ onAddNewVersion, onRegisterNew }) {
     e.preventDefault();
     setUpdateLoading(true);
     const payload = {
+      name: editingModel.name,
+      version: editingModel.version,
       id: editForm.id,
       purpose: editForm.purpose,
       architecture: editForm.architecture,
@@ -179,9 +199,253 @@ export default function Models({ onAddNewVersion, onRegisterNew }) {
     }
   };
 
+  // Calculate selected model's versions, eligible versions, and default version
+  const selectedModelObj = groupedIdentities[deploySelectedModel] || null;
+  const selectedModelVersions = useMemo(() => {
+    return selectedModelObj ? (selectedModelObj.all_versions || []) : [];
+  }, [selectedModelObj]);
+  
+  // Eligible versions for selected deployment point
+  const eligibleVersions = useMemo(() => {
+    if (!selectedModelObj) return [];
+    return selectedModelVersions.filter(v => 
+      v.is_deployable && (v.deployment_points || []).includes(deploySelectedPoint)
+    );
+  }, [selectedModelObj, selectedModelVersions, deploySelectedPoint]);
+
+  // Model's designated default version for this deployment point
+  const modelDefaultVersion = selectedModelObj?.default_versions?.[deploySelectedPoint] || '';
+  const currentlyDeployedVersion = selectedModelObj?.currently_deployed?.[deploySelectedPoint] || '';
+  const pendingVersion = (pendingDeployment && pendingDeployment.model === deploySelectedModel && pendingDeployment.point === deploySelectedPoint)
+    ? pendingDeployment.version
+    : (selectedModelObj?.pending_deployments?.[deploySelectedPoint] || '');
+
+  // Track previous model and deployment point to only auto-preselect on selection change
+  const prevSelectionRef = useRef({ model: '', point: '' });
+  useEffect(() => {
+    const hasChanged = prevSelectionRef.current.model !== deploySelectedModel || prevSelectionRef.current.point !== deploySelectedPoint;
+    prevSelectionRef.current = { model: deploySelectedModel, point: deploySelectedPoint };
+
+    if (hasChanged) {
+      if (deploySelectedModel && currentlyDeployedVersion) {
+        setDeploySelectedVersion(String(currentlyDeployedVersion));
+      } else if (deploySelectedModel && modelDefaultVersion) {
+        setDeploySelectedVersion(String(modelDefaultVersion));
+      } else if (eligibleVersions.length > 0) {
+        setDeploySelectedVersion(String(eligibleVersions[0].version));
+      } else {
+        setDeploySelectedVersion('');
+      }
+    }
+  }, [deploySelectedModel, deploySelectedPoint, currentlyDeployedVersion, modelDefaultVersion, eligibleVersions]);
+
+  // Poll deployment status and automatic rollback when a deployment is pending
+  useEffect(() => {
+    if (!pendingDeployment) return;
+    const { model, point, version, requestTime } = pendingDeployment;
+    let isCancelled = false;
+    let attempts = 0;
+    const maxAttempts = 300; // 600s / 10 minutes polling window (comfortably covers slow large model downloads ~5m + RAM load)
+
+    const poll = async () => {
+      if (isCancelled) return;
+      attempts += 1;
+      try {
+        const auditData = await modelService.getAuditHistory(model, point);
+        if (isCancelled) return;
+        const audits = auditData?.audits || [];
+
+        // Check audits with timestamps within or after the deployment request window (-3000ms for clock variance)
+        const recentAudits = audits.filter(a => {
+          const ts = typeof a.timestamp === 'number' ? a.timestamp : 0;
+          return ts >= requestTime - 3000;
+        });
+
+        // 1. Confirmed automatic rollback
+        const rollbackEvent = recentAudits.find(a => 
+          a.action === 'rollback' && a.status === 'success'
+        );
+        if (rollbackEvent) {
+          const targetV = rollbackEvent.requested_version;
+          if (!isCancelled) {
+            setPendingDeployment(null);
+            setDeployActionMsg({
+              type: 'warning',
+              text: `Deployment of ${model} v${version} failed. Automatically rolled back to v${targetV}.`
+            });
+            if (targetV != null) {
+              setDeploySelectedVersion(String(targetV));
+            }
+            await fetchModels();
+          }
+          return;
+        }
+
+        // 2. Confirmed runtime success
+        const successEvent = recentAudits.find(a => 
+          a.action === 'runtime_status' && a.status === 'success' && String(a.requested_version) === String(version)
+        );
+        if (successEvent) {
+          if (!isCancelled) {
+            setPendingDeployment(null);
+            setDeployActionMsg({
+              type: 'success',
+              text: `Successfully deployed and activated '${model}' v${version} on '${point}'`
+            });
+            await fetchModels();
+          }
+          return;
+        }
+
+        // 3. Fallback: check if backend model registry already shows rollback
+        if (attempts >= 3) {
+          const listRes = await modelService.listModels();
+          if (isCancelled) return;
+          const targetModel = (listRes?.models || []).find(m => m.name === model);
+          const activeVer = targetModel?.currently_deployed?.[point];
+          const isStillPending = targetModel?.pending_deployments?.[point] === String(version);
+          if (!isStillPending && activeVer && String(activeVer) !== String(version)) {
+            setPendingDeployment(null);
+            setDeployActionMsg({
+              type: 'warning',
+              text: `Deployment of ${model} v${version} failed. Automatically rolled back to v${activeVer}.`
+            });
+            setDeploySelectedVersion(String(activeVer));
+            await fetchModels();
+            return;
+          }
+        }
+
+        // 4. Confirmed rollback failure (no previous version available for rollback)
+        const failedRollback = recentAudits.find(a => 
+          a.action === 'rollback' && a.status === 'failure'
+        );
+        if (failedRollback) {
+          if (!isCancelled) {
+            setPendingDeployment(null);
+            const listRes = await modelService.listModels();
+            const activeModel = (listRes?.models || []).find(m => m.currently_deployed?.[point]);
+            const activeVer = activeModel?.currently_deployed?.[point];
+
+            let msg = `Deployment of ${model} v${version} failed. No previous valid version is available for rollback.`;
+            if (activeModel && activeVer) {
+              msg += ` Active model: '${activeModel.name}' v${activeVer} remains in service.`;
+            } else {
+              msg += ` No model is currently active for '${point}'.`;
+            }
+
+            setDeployActionMsg({
+              type: 'error',
+              text: msg
+            });
+            await fetchModels();
+          }
+          return;
+        }
+
+        const failureEvent = recentAudits.find(a => 
+          a.action === 'runtime_status' && a.status === 'failure' && String(a.requested_version) === String(version)
+        );
+        if (failureEvent && attempts >= 4) {
+          if (!isCancelled) {
+            setPendingDeployment(null);
+            const listRes = await modelService.listModels();
+            const activeModel = (listRes?.models || []).find(m => m.currently_deployed?.[point]);
+            const activeVer = activeModel?.currently_deployed?.[point];
+
+            let msg = `Deployment of ${model} v${version} failed: ${failureEvent.error_message || 'Pipeline load failure'}.`;
+            if (activeModel && activeVer) {
+              msg += ` Active model: '${activeModel.name}' v${activeVer} remains in service.`;
+            } else {
+              msg += ` No model is currently active for '${point}'.`;
+            }
+            setDeployActionMsg({
+              type: 'error',
+              text: msg
+            });
+            await fetchModels();
+          }
+          return;
+        }
+
+        // 5. Timeout after maxAttempts (600s / 10 minutes)
+        if (attempts >= maxAttempts) {
+          if (!isCancelled) {
+            setPendingDeployment(null);
+            setDeployActionMsg({
+              type: 'info',
+              text: `Deployment request for '${model}' v${version} was sent to registry. Pipeline runtime confirmation timed out after 10 minutes. If model artifact download or memory loading is still underway, activation will complete in the background.`
+            });
+            await fetchModels();
+          }
+          return;
+        }
+      } catch {
+        // ignore transient poll errors
+      }
+    };
+
+    const intervalId = setInterval(poll, 2000);
+    poll();
+
+    return () => {
+      isCancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [pendingDeployment]);
+
+  const handleDeploySelection = async () => {
+    if (!deploySelectedModel || !deploySelectedPoint) return;
+    setDeployActionLoading(true);
+    setDeployActionMsg(null);
+    try {
+      // If version is selected, send that version; if empty, omit version so backend resolves default
+      const targetVer = deploySelectedVersion ? Number(deploySelectedVersion) : undefined;
+      const res = await modelService.setDeployedVersion(
+        deploySelectedModel, 
+        targetVer, 
+        deploySelectedPoint
+      );
+      const effectiveVer = res.version || targetVer;
+
+      setPendingDeployment({
+        model: deploySelectedModel,
+        point: deploySelectedPoint,
+        version: effectiveVer,
+        requestTime: Date.now()
+      });
+
+      setDeployActionMsg({
+        type: 'info',
+        text: `Deployment requested for '${deploySelectedModel}' v${effectiveVer} to '${deploySelectedPoint}'. Waiting for pipeline confirmation...`
+      });
+      await fetchModels();
+    } catch (err) {
+      setDeployActionMsg({ type: 'error', text: err.message || 'Deployment failed' });
+    } finally {
+      setDeployActionLoading(false);
+    }
+  };
+
+  const handleResetSelection = async () => {
+    if (!deploySelectedModel || !deploySelectedPoint) return;
+    setPendingDeployment(null);
+    setDeployActionLoading(true);
+    setDeployActionMsg(null);
+    try {
+      await modelService.resetDeployedVersion(deploySelectedModel, deploySelectedPoint);
+      setDeployActionMsg({ type: 'success', text: `Successfully reset active deployment for '${deploySelectedModel}' on '${deploySelectedPoint}'` });
+      await fetchModels();
+    } catch (err) {
+      setDeployActionMsg({ type: 'error', text: err.message || 'Reset failed' });
+    } finally {
+      setDeployActionLoading(false);
+    }
+  };
+
   if (loading) {
     return (
-      <div className="max-w-6xl mx-auto p-12 text-center text-gray-500 bg-white rounded-lg border border-gray-200">
+      <div className="max-w-6xl mx-auto p-12 text-center text-gray-500 bg-white rounded-lg border border-gray-200 shadow-sm">
         <div className="animate-pulse flex flex-col items-center">
           <div className="h-8 w-8 bg-blue-400 rounded-full mb-4"></div>
           <p>Loading model inventory...</p>
@@ -192,7 +456,7 @@ export default function Models({ onAddNewVersion, onRegisterNew }) {
 
   if (error) {
     return (
-      <div className="max-w-6xl mx-auto p-6 bg-red-50 text-red-700 rounded-md border border-red-200">
+      <div className="max-w-6xl mx-auto p-6 bg-red-50 text-red-700 rounded-md border border-red-200 shadow-sm">
         <h3 className="font-bold mb-2">Error loading models</h3>
         <p>{error}</p>
         <button onClick={fetchModels} className="mt-4 px-4 py-2 bg-red-100 hover:bg-red-200 text-red-800 rounded transition-colors">
@@ -215,6 +479,14 @@ export default function Models({ onAddNewVersion, onRegisterNew }) {
         
         <div className="flex items-center space-x-3">
           <button 
+            onClick={() => handleOpenHistory('')}
+            className="px-4 py-2.5 bg-indigo-50 text-indigo-700 font-semibold rounded-lg shadow-sm border border-indigo-200 hover:bg-indigo-100 transition-colors flex items-center space-x-2"
+            title="View persistent deployment audit history"
+          >
+            <span>🕒</span>
+            <span>Deployment History</span>
+          </button>
+          <button 
             onClick={onRegisterNew}
             className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg shadow-sm transition-colors flex items-center space-x-2"
           >
@@ -228,6 +500,167 @@ export default function Models({ onAddNewVersion, onRegisterNew }) {
             Refresh
           </button>
         </div>
+      </div>
+
+      {/* Model-First Deployment Selection Bar */}
+      <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 p-5 rounded-xl shadow-sm space-y-3">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+          <h2 className="text-sm font-bold uppercase tracking-wider text-blue-900 flex items-center space-x-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-blue-600"></span>
+            <span>Deploy Model to Pipeline</span>
+          </h2>
+          <span className="text-xs text-blue-700 font-medium">
+            Step 1: Select Model &rarr; Step 2: Choose Deployment Point &rarr; Step 3: Verify Version &rarr; Click Deploy
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+          {/* Step 1: Select Model */}
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 uppercase mb-1">1. Select Registered Model</label>
+            <select
+              value={deploySelectedModel}
+              onChange={(e) => setDeploySelectedModel(e.target.value)}
+              className="w-full p-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-900 focus:ring-blue-500 focus:border-blue-500"
+            >
+              <option value="">-- Choose a Model --</option>
+              {Object.keys(groupedIdentities).map(mName => (
+                <option key={mName} value={mName}>{mName}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Step 2: Deployment Point */}
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 uppercase mb-1">2. Deployment Point</label>
+            <select
+              value={deploySelectedPoint}
+              onChange={(e) => setDeploySelectedPoint(e.target.value)}
+              className="w-full p-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-900 focus:ring-blue-500 focus:border-blue-500"
+            >
+              {allDeploymentPoints.map(dp => (
+                <option key={dp} value={dp}>{dp}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Step 3: Select Version */}
+          <div>
+            <div className="flex justify-between items-center mb-1">
+              <label className="block text-xs font-semibold text-gray-700 uppercase">3. Model Version</label>
+              <div className="flex items-center space-x-1">
+                {currentlyDeployedVersion && (
+                  <span className="text-[10px] font-bold text-green-700 bg-green-100 px-1.5 py-0.2 rounded" title="Currently deployed to pipeline">
+                    Active: v{currentlyDeployedVersion}
+                  </span>
+                )}
+                {pendingVersion && (
+                  <span className="text-[10px] font-bold text-amber-800 bg-amber-100 px-1.5 py-0.2 rounded animate-pulse" title="Deployment requested; awaiting runtime confirmation">
+                    Pending: v{pendingVersion}
+                  </span>
+                )}
+                {modelDefaultVersion && (
+                  <span className="text-[10px] font-bold text-blue-700 bg-blue-100 px-1.5 py-0.2 rounded" title="Designated default version">
+                    Default: v{modelDefaultVersion}
+                  </span>
+                )}
+              </div>
+            </div>
+            <select
+              disabled={!deploySelectedModel}
+              value={deploySelectedVersion}
+              onChange={(e) => setDeploySelectedVersion(e.target.value)}
+              className="w-full p-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-900 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 disabled:text-gray-400"
+            >
+              {!deploySelectedModel ? (
+                <option value="">Select model first...</option>
+              ) : selectedModelVersions.length === 0 ? (
+                <option value="">No versions available</option>
+              ) : (
+                selectedModelVersions.map(v => {
+                  const isEligible = v.is_deployable && (v.deployment_points || []).includes(deploySelectedPoint);
+                  const isCurDeployed = currentlyDeployedVersion && String(currentlyDeployedVersion) === String(v.version);
+                  const isPending = pendingVersion && String(pendingVersion) === String(v.version);
+                  const isDef = modelDefaultVersion && String(modelDefaultVersion) === String(v.version);
+                  let label = `v${v.version}`;
+                  if (isCurDeployed) label += " (Currently Deployed)";
+                  else if (isPending) label += " (Deployment Pending)";
+                  else if (isDef) label += " (Default Available)";
+                  else if (isEligible) label += " (Deployable)";
+                  else label += " (Non-Deployable / Ineligible)";
+                  return (
+                    <option key={v.version} value={v.version} disabled={!isEligible}>
+                      {label}
+                    </option>
+                  );
+                })
+              )}
+            </select>
+          </div>
+
+          {/* Action Button */}
+          <div className="flex space-x-2">
+            <button
+              onClick={handleDeploySelection}
+              disabled={
+                deployActionLoading || 
+                Boolean(pendingDeployment) ||
+                !deploySelectedModel || 
+                eligibleVersions.length === 0
+              }
+              className={`flex-1 py-2 px-3 text-sm font-semibold rounded-md shadow-sm transition-colors text-white ${
+                deployActionLoading || Boolean(pendingDeployment) || !deploySelectedModel || eligibleVersions.length === 0
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  : 'bg-blue-600 hover:bg-blue-700'
+              }`}
+              title={
+                !deploySelectedModel 
+                  ? "Select a model first" 
+                  : eligibleVersions.length === 0 
+                  ? `Model '${deploySelectedModel}' has no eligible versions for '${deploySelectedPoint}'` 
+                  : `Deploy selected version to ${deploySelectedPoint}`
+              }
+            >
+              {deployActionLoading || Boolean(pendingDeployment) ? 'Deploying...' : 'Deploy'}
+            </button>
+            {currentlyDeployedVersion && (
+              <button
+                onClick={handleResetSelection}
+                disabled={deployActionLoading || Boolean(pendingDeployment)}
+                className="py-2 px-3 text-sm font-semibold rounded-md shadow-sm bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 transition-colors disabled:opacity-50"
+                title={`Reset active deployment for '${deploySelectedPoint}'`}
+              >
+                Reset
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Status / Error Message */}
+        {deployActionMsg && (
+          <div className={`p-2.5 rounded text-xs font-semibold flex items-center justify-between ${
+            deployActionMsg.type === 'success' 
+              ? 'bg-green-100 text-green-800 border border-green-200' 
+              : deployActionMsg.type === 'warning'
+              ? 'bg-amber-100 text-amber-800 border border-amber-200'
+              : deployActionMsg.type === 'info'
+              ? 'bg-blue-100 text-blue-800 border border-blue-200'
+              : 'bg-red-100 text-red-800 border border-red-200'
+          }`}>
+            <span>{deployActionMsg.text}</span>
+            {pendingDeployment && (
+              <span className="text-[10px] font-normal text-blue-600 ml-2 animate-pulse whitespace-nowrap">
+                Waiting for pipeline activation (download & memory load in progress)...
+              </span>
+            )}
+          </div>
+        )}
+
+        {deploySelectedModel && eligibleVersions.length === 0 && (
+          <p className="text-xs text-amber-800 font-medium bg-amber-50 p-2 rounded border border-amber-200">
+            Warning: Model <strong>&apos;{deploySelectedModel}&apos;</strong> does not have any versions configured with <code>is_deployable=true</code> and assigned to <strong>&apos;{deploySelectedPoint}&apos;</strong>.
+          </p>
+        )}
       </div>
 
       {/* Controls Bar: Search, Filters, Sort */}
@@ -316,6 +749,7 @@ export default function Models({ onAddNewVersion, onRegisterNew }) {
               onDelete={setDeletingModel} 
               onAddNewVersion={onAddNewVersion}
               onRefresh={fetchModels}
+              onViewHistory={handleOpenHistory}
             />
           ))}
         </div>
@@ -425,6 +859,14 @@ export default function Models({ onAddNewVersion, onRegisterNew }) {
           </div>
         </div>
       )}
+
+      {/* Deployment Audit History Modal */}
+      <DeploymentHistoryModal
+        isOpen={historyModalOpen}
+        onClose={() => setHistoryModalOpen(false)}
+        initialModelName={historySelectedModel}
+        availableModels={Object.keys(groupedIdentities)}
+      />
     </div>
   );
 }

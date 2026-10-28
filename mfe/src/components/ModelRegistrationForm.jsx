@@ -18,6 +18,7 @@ export default function ModelRegistrationForm({ initialData }) {
     new_environment: '',
     architecture: '',
     new_architecture: '',
+    framework: '',
     accuracy: '',
     priority: '',
     is_deployable: false,
@@ -35,6 +36,10 @@ export default function ModelRegistrationForm({ initialData }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  
+  // Detection state
+  const [detectionInfo, setDetectionInfo] = useState(null);
+  const [detectedFramework, setDetectedFramework] = useState('');
   
   // Master data lists
   const [architectures, setArchitectures] = useState([]);
@@ -172,11 +177,73 @@ export default function ModelRegistrationForm({ initialData }) {
     setError(null);
   };
 
-  const handleFileChange = (e) => {
+  const handleFileChange = async (e) => {
     if (e.target.files && e.target.files.length > 0) {
-      setFile(Array.from(e.target.files));
+      const selectedFiles = Array.from(e.target.files);
+      setFile(selectedFiles);
+      setDetectionInfo(null);
+      setDetectedFramework('');
+      setFormData(prev => ({ ...prev, framework: '' }));
+
+      // Build small formData with config/meta files to inspect
+      const inspectData = new FormData();
+      let hasInspectionFiles = false;
+
+      selectedFiles.forEach(f => {
+        const path = f.webkitRelativePath || f.name;
+        const lower = path.toLowerCase();
+        // Send small configuration and metadata files
+        if (lower.endsWith('meta.json') || lower.endsWith('config.cfg') || lower.endsWith('config.json') || lower.endsWith('saved_model.pb') || lower.endsWith('.onnx') || lower.endsWith('.pt') || lower.endsWith('.h5') || lower.endsWith('.hdf5')) {
+          inspectData.append('model_files', f);
+          inspectData.append('model_paths', path);
+          hasInspectionFiles = true;
+        }
+      });
+
+      if (hasInspectionFiles) {
+        try {
+          const res = await modelService.inspectArtifact(inspectData);
+          if (res && res.success && res.detection) {
+            const det = res.detection;
+            setDetectionInfo(det);
+
+            if (det.detected && det.supported) {
+              setDetectedFramework(det.framework || '');
+
+              // Auto-set model_type to NER if not pre-locked
+              if (det.model_type) {
+                setFormData(prev => ({
+                  ...prev,
+                  model_type: prev.model_type || det.model_type,
+                  architecture: det.architecture || prev.architecture
+                }));
+
+                // Auto-configure deployment points for NER
+                if (det.model_type === 'NER') {
+                  setSelectedDeploymentPoints(['Text Pipeline']);
+                }
+              }
+
+              // If architecture detected, ensure it's in the dropdown options
+              if (det.architecture) {
+                setArchitectures(prev => prev.includes(det.architecture) ? prev : [...prev, det.architecture]);
+                setFormData(prev => ({
+                  ...prev,
+                  architecture: det.architecture
+                }));
+              }
+            } else if (det.detected && !det.supported) {
+              setDetectedFramework(det.framework || '');
+            }
+          }
+        } catch (inspectErr) {
+          console.error("Artifact inspection failed:", inspectErr);
+        }
+      }
     } else {
       setFile(null);
+      setDetectionInfo(null);
+      setDetectedFramework('');
     }
   };
 
@@ -222,12 +289,21 @@ export default function ModelRegistrationForm({ initialData }) {
       return;
     }
 
+    const finalFramework = detectedFramework || formData.framework;
+    if (!finalFramework) {
+      setError("Framework must be selected when detection fails.");
+      return;
+    }
+
     setLoading(true);
 
     try {
       const submitData = new FormData();
       submitData.append('model_name', formData.model_name.trim());
       submitData.append('model_type', formData.model_type);
+      if (finalFramework) {
+        submitData.append('framework', finalFramework);
+      }
 
       if (formData.model_type === 'Speech') {
         const finalLang = formData.language === '__ADD_NEW__' ? formData.new_language.trim() : formData.language.trim();
@@ -271,6 +347,7 @@ export default function ModelRegistrationForm({ initialData }) {
         new_environment: '',
         architecture: '',
         new_architecture: '',
+        framework: '',
         accuracy: '',
         priority: '',
         is_deployable: false,
@@ -280,6 +357,8 @@ export default function ModelRegistrationForm({ initialData }) {
       setAddingNewLang(false);
       setAddingNewEnv(false);
       setFile(null);
+      setDetectionInfo(null);
+      setDetectedFramework('');
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
@@ -305,6 +384,35 @@ export default function ModelRegistrationForm({ initialData }) {
       {success && (
         <div className="mb-4 p-3 bg-green-50 text-green-700 border border-green-200 rounded-md text-sm">
           {success}
+        </div>
+      )}
+
+      {detectionInfo && (
+        <div className={`mb-4 p-3 rounded-md border text-sm ${
+          detectionInfo.detected && detectionInfo.supported
+            ? 'bg-blue-50 text-blue-800 border-blue-200'
+            : detectionInfo.detected && !detectionInfo.supported
+              ? 'bg-amber-50 text-amber-800 border-amber-200'
+              : 'bg-gray-50 text-gray-700 border-gray-200'
+        }`}>
+          <div className="flex items-center space-x-2">
+            <span className="font-bold">
+              {detectionInfo.detected && detectionInfo.supported ? '✓ Framework & Architecture Detected' :
+               detectionInfo.detected && !detectionInfo.supported ? '⚠️ Unsupported Model / Framework' :
+               'ℹ Artifact Inspection'}
+            </span>
+            {detectionInfo.framework && (
+              <span className="px-2 py-0.5 rounded text-xs font-semibold bg-white border shadow-2xs">
+                {detectionInfo.framework}
+              </span>
+            )}
+            {detectionInfo.architecture && (
+              <span className="px-2 py-0.5 rounded text-xs font-semibold bg-white border shadow-2xs">
+                Arch: {detectionInfo.architecture}
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-xs">{detectionInfo.reason}</p>
         </div>
       )}
 
@@ -336,6 +444,29 @@ export default function ModelRegistrationForm({ initialData }) {
             <option value="NER">NER</option>
             <option value="File Classifier">File Classifier</option>
           </select>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Framework *:</label>
+          {detectedFramework ? (
+            <input 
+              type="text" 
+              value={detectedFramework} 
+              disabled 
+              className="w-full p-2 border border-gray-300 rounded bg-gray-100 cursor-not-allowed" 
+            />
+          ) : (
+            <select
+              name="framework"
+              value={formData.framework}
+              onChange={handleChange}
+              className="w-full p-2 border border-gray-300 rounded focus:ring-blue-500 focus:border-blue-500"
+            >
+              <option value="">Select Framework...</option>
+              <option value="spaCy">spaCy</option>
+              <option value="Hugging Face">Hugging Face</option>
+            </select>
+          )}
         </div>
 
         {/* Dynamic Fields for Speech */}

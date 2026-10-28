@@ -170,7 +170,7 @@ export default function ModelListTable({ models, onListModels, onUpdateModel, on
                         {m.is_deployable ? 'Yes' : 'No'}
                       </span>
                     </td>
-                    <td className="p-3 text-sm text-gray-600">{m.accuracy || 0.0}</td>
+                    <td className="p-3 text-sm text-gray-600">{m.accuracy != null ? m.accuracy : 'N/A'}</td>
                     <td className="p-3 text-sm flex gap-2">
                       <button 
                         onClick={() => openEdit(m)}

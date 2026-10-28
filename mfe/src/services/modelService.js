@@ -8,7 +8,7 @@ async function handleResponse(response) {
       if (errorData.error) {
         errorMessage = errorData.error;
       }
-    } catch (e) {
+    } catch {
       // Ignore JSON parse errors for non-JSON responses
     }
     throw new Error(errorMessage);
@@ -32,6 +32,15 @@ export const modelService = {
       method: 'POST',
       body: formData,
       // Do NOT set Content-Type header! Browser auto-generates it with boundary
+    });
+    return handleResponse(response);
+  },
+
+  // POST /api/models/inspect-artifact/
+  inspectArtifact: async (formData) => {
+    const response = await fetch('/api/models/inspect-artifact/', {
+      method: 'POST',
+      body: formData,
     });
     return handleResponse(response);
   },
@@ -106,6 +115,43 @@ export const modelService = {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ name, version, deployment_point }),
+    });
+    return handleResponse(response);
+  },
+
+  // POST /api/models/reset-deployed/
+  resetDeployedVersion: async (name, deployment_point) => {
+    const response = await fetch('/api/models/reset-deployed/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name, deployment_point }),
+    });
+    return handleResponse(response);
+  },
+
+  // POST /api/models/rollback/
+  rollbackDeployedVersion: async (name, deployment_point, current_version) => {
+    const response = await fetch('/api/models/rollback/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name, deployment_point, current_version }),
+    });
+    return handleResponse(response);
+  },
+
+  // GET /api/models/audit-history/
+  getAuditHistory: async (name, deployment_point) => {
+    let url = '/api/models/audit-history/';
+    const params = [];
+    if (name) params.push(`model_name=${encodeURIComponent(name)}`);
+    if (deployment_point) params.push(`deployment_point=${encodeURIComponent(deployment_point)}`);
+    if (params.length) url += `?${params.join('&')}`;
+    const response = await fetch(url, {
+      method: 'GET',
     });
     return handleResponse(response);
   },

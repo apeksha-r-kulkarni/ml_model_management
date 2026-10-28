@@ -2,13 +2,16 @@ import React, { useState } from 'react';
 import ModelVersionList from './ModelVersionList';
 import { modelService } from '../../services/modelService';
 
-export default function ModelCard({ name, modelInfo, versions, onEdit, onDelete, onAddNewVersion, onRefresh }) {
+export default function ModelCard({ name, modelInfo, versions, onEdit, onDelete, onAddNewVersion, onRefresh, onViewHistory }) {
   const [expanded, setExpanded] = useState(false);
   const [deployLoading, setDeployLoading] = useState(false);
   
   // Array is pre-sorted descending by version
   const latest = versions[0] || {};
   const currentlyDeployed = modelInfo?.currently_deployed || {};
+  const explicitlyDeployed = modelInfo?.explicitly_deployed || {};
+  const defaultVersions = modelInfo?.default_versions || {};
+  const pendingDeployments = modelInfo?.pending_deployments || {};
 
   const handleSetDeployed = async (verNum, dp) => {
     setDeployLoading(true);
@@ -22,16 +25,33 @@ export default function ModelCard({ name, modelInfo, versions, onEdit, onDelete,
     }
   };
 
+  const handleResetDeployed = async (dp) => {
+    setDeployLoading(true);
+    try {
+      await modelService.resetDeployedVersion(name, dp);
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      alert(`Failed to reset deployed version: ${err.message}`);
+    } finally {
+      setDeployLoading(false);
+    }
+  };
+
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col h-full overflow-hidden transition-all hover:shadow-md">
       <div className="p-6 flex flex-col flex-1">
         <div className="flex flex-col sm:flex-row justify-between items-start gap-4 mb-4">
           <div className="flex-1 min-w-0 pr-4">
-            <div className="flex items-start space-x-3">
+            <div className="flex items-start space-x-2 flex-wrap gap-y-1">
               <h3 className="text-xl font-bold text-gray-900 line-clamp-2 break-all" title={name}>{name}</h3>
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-800 flex-shrink-0 mt-0.5">
                 {modelInfo?.model_type || 'Unknown'}
               </span>
+              {latest?.framework && (
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800 flex-shrink-0 mt-0.5">
+                  {latest.framework}
+                </span>
+              )}
             </div>
             <div className="text-xs mt-1 text-gray-500 line-clamp-2">
               Purpose: <span className="font-medium text-gray-700 break-words">{modelInfo?.purpose || 'N/A'}</span>
@@ -39,6 +59,16 @@ export default function ModelCard({ name, modelInfo, versions, onEdit, onDelete,
           </div>
           
           <div className="flex items-center space-x-2 flex-shrink-0">
+            {onViewHistory && (
+              <button 
+                onClick={() => onViewHistory(name)}
+                className="px-3 py-2 bg-indigo-50 text-indigo-700 text-sm font-semibold rounded-md hover:bg-indigo-100 transition-colors border border-indigo-100 flex items-center space-x-1"
+                title="View deployment audit history for this model"
+              >
+                <span>🕒</span>
+                <span>History</span>
+              </button>
+            )}
             <button 
               onClick={() => onAddNewVersion({
                 model_name: name,
@@ -69,13 +99,32 @@ export default function ModelCard({ name, modelInfo, versions, onEdit, onDelete,
           <div className="flex flex-col">
             <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold mb-1">Currently Deployed</p>
             <div className="flex-1 overflow-y-auto max-h-[48px] pr-1">
-              {Object.keys(currentlyDeployed).length > 0 ? (
+              {Object.keys(currentlyDeployed).length > 0 || Object.keys(pendingDeployments).length > 0 ? (
                 <div className="flex flex-col space-y-1 mt-1">
                   {Object.entries(currentlyDeployed).map(([dp, ver]) => (
                     <div key={dp} className="flex items-center space-x-2">
-                      <span className="text-xs text-gray-600 font-medium truncate max-w-[80px]">{dp}:</span>
-                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-800 flex-shrink-0">
-                        v{ver}
+                      <span className="text-xs text-gray-600 font-medium truncate max-w-[80px]" title={dp}>{dp}:</span>
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold flex-shrink-0 bg-green-100 text-green-800">
+                        v{ver} (Deployed)
+                      </span>
+                    </div>
+                  ))}
+                  {Object.entries(pendingDeployments).map(([dp, ver]) => (
+                    <div key={`pending-${dp}`} className="flex items-center space-x-2">
+                      <span className="text-xs text-gray-600 font-medium truncate max-w-[80px]" title={dp}>{dp}:</span>
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold flex-shrink-0 bg-amber-100 text-amber-800">
+                        v{ver} (Pending)
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : Object.keys(defaultVersions).length > 0 ? (
+                <div className="flex flex-col space-y-1 mt-1">
+                  {Object.entries(defaultVersions).map(([dp, ver]) => (
+                    <div key={dp} className="flex items-center space-x-2">
+                      <span className="text-xs text-gray-500 font-medium truncate max-w-[80px]" title={dp}>{dp}:</span>
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 bg-blue-50 text-blue-700 border border-blue-200">
+                        v{ver} (Default Available)
                       </span>
                     </div>
                   ))}
@@ -89,7 +138,7 @@ export default function ModelCard({ name, modelInfo, versions, onEdit, onDelete,
           <div>
             <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold mb-1">Accuracy / Priority</p>
             <p className="text-sm font-medium text-gray-900 truncate">
-              {latest.accuracy || '0.0'}% {latest.priority !== null && latest.priority !== undefined ? `(P${latest.priority})` : ''}
+              {latest.accuracy != null ? `${latest.accuracy}%` : 'N/A'} {latest.priority !== null && latest.priority !== undefined ? `(P${latest.priority})` : ''}
             </p>
           </div>
 
@@ -146,9 +195,13 @@ export default function ModelCard({ name, modelInfo, versions, onEdit, onDelete,
           <ModelVersionList 
             versions={versions} 
             currentlyDeployed={currentlyDeployed}
+            pendingDeployments={pendingDeployments}
+            defaultVersions={defaultVersions}
+            deployLoading={deployLoading}
             onEdit={onEdit} 
             onDelete={onDelete} 
             onSetDeployed={handleSetDeployed}
+            onResetDeployed={handleResetDeployed}
           />
         </div>
       )}
